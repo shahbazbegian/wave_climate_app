@@ -1,14 +1,13 @@
 """
 Wave Climate Projection Tool
 Professional GUI Application for Wave Climate Analysis under RCP Scenarios
-CSV-based version - Using Plotly for interactive visualizations
+CSV-based version - Using Altair for visualizations
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import altair as alt
 from scipy.stats import genpareto, linregress
 from datetime import datetime
 import warnings
@@ -121,149 +120,203 @@ def generate_projection(df_obs, df_proj, scenario, variable):
         return None
 
 # ============================================================================
-# Plotting Functions with Plotly
+# Plotting Functions with Altair
 # ============================================================================
 
 def create_gpd_plot(data, result, variable, scenario, threshold_percentile):
-    """Create GPD analysis plots using Plotly"""
+    """Create GPD analysis plots using Altair"""
     ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'
     title_var = 'Significant Wave Height' if variable == 'swh' else 'Mean Wave Period'
     
-    # Create subplots
-    fig = make_subplots(rows=1, cols=2, 
-                        subplot_titles=(f'Declustered Peaks - {scenario} {title_var}',
-                                      'GPD Fit to Exceedances'))
+    # Prepare data for plotting
+    df_full = pd.DataFrame({
+        'time': data.index,
+        'value': data.values,
+        'type': 'Full data'
+    })
+    
+    df_peaks = pd.DataFrame({
+        'time': result['declustered'].index,
+        'value': result['declustered'].values,
+        'type': 'Peaks'
+    })
+    
+    df_combined = pd.concat([df_full, df_peaks], ignore_index=True)
     
     # Plot 1: Time series with peaks
-    fig.add_trace(
-        go.Scatter(x=data.index, y=data.values,
-                   mode='lines',
-                   name='Full data',
-                   line=dict(color='gray', width=0.5),
-                   opacity=0.3),
-        row=1, col=1
+    chart1 = alt.Chart(df_combined).mark_line(opacity=0.3, color='gray').encode(
+        x='time:T',
+        y='value:Q'
+    ).properties(
+        title=f'Declustered Peaks - {scenario} {title_var}',
+        width=400,
+        height=300
     )
     
-    fig.add_trace(
-        go.Scatter(x=result['declustered'].index, y=result['declustered'].values,
-                   mode='markers',
-                   name='Peaks',
-                   marker=dict(color='blue', size=6)),
-        row=1, col=1
+    # Add peaks as points
+    peaks_chart = alt.Chart(df_peaks).mark_circle(color='blue', size=60).encode(
+        x='time:T',
+        y='value:Q'
     )
     
     # Add threshold line
-    fig.add_hline(y=result['threshold'], line_dash="dash", line_color="red",
-                  annotation_text=f'Threshold ({threshold_percentile}%)',
-                  row=1, col=1)
+    threshold_data = pd.DataFrame({
+        'y': [result['threshold']],
+        'label': [f'Threshold ({threshold_percentile}%)']
+    })
+    threshold_line = alt.Chart(pd.DataFrame({'y': [result['threshold']]})).mark_rule(
+        color='red',
+        strokeDash=[5, 5]
+    ).encode(
+        y='y:Q'
+    )
     
-    fig.update_xaxes(title_text='Time', row=1, col=1)
-    fig.update_yaxes(title_text=ylabel, row=1, col=1)
+    chart1 = (chart1 + peaks_chart + threshold_line).properties(
+        title=f'Declustered Peaks - {scenario} {title_var}'
+    )
     
     # Plot 2: GPD fit
     exceedances = result['exceedances']
     if len(exceedances) > 0:
+        df_exceed = pd.DataFrame({
+            'exceedance': exceedances.values
+        })
+        
         # Histogram
-        fig.add_trace(
-            go.Histogram(x=exceedances.values,
-                        nbinsx=30,
-                        name='Exceedances',
-                        opacity=0.5,
-                        marker_color='blue',
-                        histnorm='probability density'),
-            row=1, col=2
+        hist = alt.Chart(df_exceed).mark_bar(
+            opacity=0.5,
+            color='blue'
+        ).encode(
+            alt.X('exceedance:Q', bin=alt.Bin(maxbins=30), title=f'Exceedance ({ylabel})'),
+            alt.Y('count()', stack=None, title='Density')
         )
         
         # GPD PDF
         x = np.linspace(0, exceedances.max(), 200)
         pdf = genpareto.pdf(x, result['xi'], result['loc'], result['beta'])
-        fig.add_trace(
-            go.Scatter(x=x, y=pdf,
-                       mode='lines',
-                       name=f'GPD fit (ξ={result["xi"]:.2f}, β={result["beta"]:.2f})',
-                       line=dict(color='red', width=2)),
-            row=1, col=2
+        df_pdf = pd.DataFrame({
+            'x': x,
+            'pdf': pdf
+        })
+        
+        pdf_line = alt.Chart(df_pdf).mark_line(
+            color='red',
+            strokeWidth=2
+        ).encode(
+            x='x:Q',
+            y='pdf:Q'
         )
+        
+        chart2 = (hist + pdf_line).properties(
+            title=f'GPD Fit (ξ={result["xi"]:.2f}, β={result["beta"]:.2f})',
+            width=400,
+            height=300
+        )
+        
+        return chart1 | chart2
     
-    fig.update_xaxes(title_text=f'Exceedance ({ylabel})', row=1, col=2)
-    fig.update_yaxes(title_text='Density', row=1, col=2)
-    
-    fig.update_layout(height=500, showlegend=True,
-                     template='plotly_white',
-                     hovermode='x unified')
-    
-    return fig
+    return chart1
 
 def create_projection_plot(projection_results, variable, scenario_label):
-    """Create projection plots using Plotly"""
+    """Create projection plots using Altair"""
     ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'
     title_var = 'Significant Wave Height' if variable == 'swh' else 'Mean Wave Period'
     
-    colors = {'rcp45': 'blue', 'rcp85': 'red'}
-    labels = {'rcp45': 'RCP 4.5', 'rcp85': 'RCP 8.5'}
+    # Prepare yearly averages
+    yearly_data = []
+    trend_data = []
     
-    # Create subplots
-    fig = make_subplots(rows=1, cols=2,
-                        subplot_titles=(f'Projected {title_var} - {scenario_label}',
-                                      'Long-term Trend Analysis'))
-    
-    # Plot 1: Yearly averages
     for df in projection_results:
         scenario = df['scenario'].iloc[0]
         df_copy = df.copy()
         df_copy['year'] = pd.to_datetime(df_copy['time']).dt.year
         yearly_avg = df_copy.groupby('year')[variable].mean().reset_index()
+        yearly_avg['scenario'] = scenario
+        yearly_data.append(yearly_avg)
         
-        fig.add_trace(
-            go.Scatter(x=pd.to_datetime(yearly_avg['year'], format='%Y'),
-                      y=yearly_avg[variable],
-                      mode='lines+markers',
-                      name=labels.get(scenario, scenario),
-                      line=dict(color=colors.get(scenario, 'gray'), width=2.5),
-                      marker=dict(size=8)),
-            row=1, col=1
-        )
-    
-    fig.update_xaxes(title_text='Time', row=1, col=1)
-    fig.update_yaxes(title_text=ylabel, row=1, col=1)
-    
-    # Plot 2: Long-term trends
-    for df in projection_results:
-        scenario = df['scenario'].iloc[0]
-        df_copy = df.copy()
-        df_copy['year'] = pd.to_datetime(df_copy['time']).dt.year
-        yearly_means = df_copy.groupby('year')[variable].mean()
-        
-        x = yearly_means.index.values
-        y = yearly_means.values
+        # Calculate trend
+        x = yearly_avg['year'].values
+        y = yearly_avg[variable].values
         slope, intercept, r_value, p_value, std_err = linregress(x, y)
         trend = intercept + slope * x
-        
-        fig.add_trace(
-            go.Scatter(x=x, y=y,
-                       mode='markers',
-                       name=f'{labels.get(scenario, scenario)} - yearly',
-                       marker=dict(color=colors.get(scenario, 'gray'), size=6),
-                       opacity=0.7),
-            row=1, col=2
+        trend_df = pd.DataFrame({
+            'year': x,
+            'trend': trend,
+            'scenario': scenario,
+            'slope': slope
+        })
+        trend_data.append(trend_df)
+    
+    yearly_df = pd.concat(yearly_data, ignore_index=True)
+    trend_df = pd.concat(trend_data, ignore_index=True)
+    
+    # Plot 1: Yearly averages
+    colors = {'rcp45': 'blue', 'rcp85': 'red'}
+    labels = {'rcp45': 'RCP 4.5', 'rcp85': 'RCP 8.5'}
+    
+    base = alt.Chart(yearly_df).encode(
+        x=alt.X('year:Q', title='Time'),
+        y=alt.Y(f'{variable}:Q', title=ylabel)
+    )
+    
+    lines = []
+    for scenario in yearly_df['scenario'].unique():
+        df_scenario = yearly_df[yearly_df['scenario'] == scenario]
+        line = base.mark_line(
+            strokeWidth=2.5,
+            color=colors.get(scenario, 'gray')
+        ).transform_filter(
+            alt.datum.scenario == scenario
+        ).properties(
+            title=f'Projected {title_var} - {scenario_label}'
         )
-        
-        fig.add_trace(
-            go.Scatter(x=x, y=trend,
-                       mode='lines',
-                       name=f'{labels.get(scenario, scenario)} trend (slope={slope:.4f} {ylabel}/year)',
-                       line=dict(color=colors.get(scenario, 'gray'), width=2, dash='dash')),
-            row=1, col=2
+        points = base.mark_circle(
+            size=60,
+            color=colors.get(scenario, 'gray')
+        ).transform_filter(
+            alt.datum.scenario == scenario
         )
+        lines.append(line + points)
     
-    fig.update_xaxes(title_text='Year', row=1, col=2)
-    fig.update_yaxes(title_text=f'Mean {ylabel}', row=1, col=2)
+    chart1 = alt.layer(*lines).properties(
+        width=400,
+        height=300
+    )
     
-    fig.update_layout(height=500, showlegend=True,
-                     template='plotly_white',
-                     hovermode='x unified')
+    # Plot 2: Long-term trends
+    trend_base = alt.Chart(trend_df).encode(
+        x=alt.X('year:Q', title='Year'),
+        y=alt.Y('trend:Q', title=f'Mean {ylabel}')
+    )
     
-    return fig
+    trend_lines = []
+    for scenario in trend_df['scenario'].unique():
+        df_scenario = trend_df[trend_df['scenario'] == scenario]
+        slope = df_scenario['slope'].iloc[0]
+        line = trend_base.mark_line(
+            strokeDash=[5, 5],
+            strokeWidth=2,
+            color=colors.get(scenario, 'gray')
+        ).transform_filter(
+            alt.datum.scenario == scenario
+        )
+        points = alt.Chart(yearly_df[yearly_df['scenario'] == scenario]).mark_circle(
+            size=50,
+            opacity=0.7,
+            color=colors.get(scenario, 'gray')
+        ).encode(
+            x='year:Q',
+            y=f'{variable}:Q'
+        )
+        trend_lines.append(line + points)
+    
+    chart2 = alt.layer(*trend_lines).properties(
+        title=f'Long-term Trend Analysis - {title_var}',
+        width=400,
+        height=300
+    )
+    
+    return chart1 | chart2
 
 # ============================================================================
 # Initialize session state
@@ -508,8 +561,8 @@ with tab2:
                     col4.metric("β (Scale)", f"{result['beta']:.4f}")
                     
                     # Create and display plot
-                    fig = create_gpd_plot(data, result, variable, gpd_scenario, threshold_percentile)
-                    st.plotly_chart(fig, use_container_width=True)
+                    chart = create_gpd_plot(data, result, variable, gpd_scenario, threshold_percentile)
+                    st.altair_chart(chart, use_container_width=True)
 
 # ============================================================================
 # Tab 3: Projections
@@ -564,8 +617,8 @@ with tab3:
                     
                     if projection_results:
                         # Create and display plot
-                        fig = create_projection_plot(projection_results, variable, proj_scenario)
-                        st.plotly_chart(fig, use_container_width=True)
+                        chart = create_projection_plot(projection_results, variable, proj_scenario)
+                        st.altair_chart(chart, use_container_width=True)
                         
                         # Combined data download
                         combined_df = pd.concat(projection_results, ignore_index=True)
@@ -649,4 +702,4 @@ st.markdown("""
 4. **Export**: Download results as CSV files
 """)
 st.markdown("---")
-st.caption("Wave Climate Projection Tool v2.0 | Plotly Edition | RCP4.5/RCP8.5")
+st.caption("Wave Climate Projection Tool v3.0 | Altair Edition | RCP4.5/RCP8.5")
