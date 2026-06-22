@@ -2,7 +2,6 @@
 Wave Climate Projection Tool
 Professional GUI Application for Wave Climate Analysis under RCP Scenarios
 CSV-based version - All data in CSV format
-Author: Based on research paper "Wave Climate Projection under Climate Change Scenarios"
 """
 
 import streamlit as st
@@ -14,7 +13,7 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-# Set page config must be the first Streamlit command
+# Page config must be the first Streamlit command
 st.set_page_config(page_title="Wave Climate Projection Tool", layout="wide")
 
 # ============================================================================
@@ -45,22 +44,6 @@ def standardize_column_names(df, data_type):
         if 'tm' not in df.columns and 'mp1' in df.columns:
             df.rename(columns={'mp1': 'tm'}, inplace=True)
     
-    return df
-
-def load_csv_with_date_parsing(file_path):
-    """Load CSV with flexible date parsing"""
-    try:
-        df = pd.read_csv(file_path, parse_dates=['time'], date_format='%Y-%m-%d %H:%M:%S')
-    except:
-        try:
-            df = pd.read_csv(file_path, parse_dates=['time'])
-        except:
-            try:
-                df = pd.read_csv(file_path)
-                if 'time' in df.columns:
-                    df['time'] = pd.to_datetime(df['time'], format='mixed')
-            except:
-                df = pd.read_csv(file_path)
     return df
 
 def run_gpd_analysis(data, decluster_hours, percentile, data_name):
@@ -380,7 +363,6 @@ with tab2:
                     
                     # Plot results
                     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-                    fig.patch.set_facecolor('#f0f0f0')
                     
                     # Time series with peaks
                     ax1.plot(data.index, data.values, color='gray', alpha=0.3, linewidth=0.5, label='Full data')
@@ -408,7 +390,7 @@ with tab2:
                     
                     plt.tight_layout()
                     st.pyplot(fig)
-                    plt.close(fig)  # Close figure to free memory
+                    plt.close(fig)
 
 # ============================================================================
 # Tab 3: Projections
@@ -464,7 +446,6 @@ with tab3:
                     if projection_results:
                         # Plot combined projections
                         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-                        fig.patch.set_facecolor('#f0f0f0')
                         
                         colors = {'rcp45': 'blue', 'rcp85': 'red'}
                         labels = {'rcp45': 'RCP 4.5', 'rcp85': 'RCP 8.5'}
@@ -510,7 +491,7 @@ with tab3:
                         
                         plt.tight_layout()
                         st.pyplot(fig)
-                        plt.close(fig)  # Close figure to free memory
+                        plt.close(fig)
                         
                         # Combined data download
                         combined_df = pd.concat(projection_results, ignore_index=True)
