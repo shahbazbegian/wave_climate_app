@@ -1,1938 +1,575 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "ab2a35e8",
-   "metadata": {
-    "vscode": {
-     "languageId": "plaintext"
+"""
+Wave Climate Projection Tool
+Professional GUI Application for Wave Climate Analysis under RCP Scenarios
+CSV-based version - All data in CSV format
+Author: Based on research paper "Wave Climate Projection under Climate Change Scenarios"
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import genpareto, linregress
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+import os
+from io import StringIO
+
+st.set_page_config(page_title="Wave Climate Projection Tool", layout="wide")
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def standardize_column_names(df, data_type):
+    """Standardize column names to 'swh' or 'tm'"""
+    df = df.copy()
+    
+    if data_type == 'swh':
+        possible_names = ['swh', 'SWH', 'hs', 'Hs', 'hs (m)', 'Hs (m)', 'significant_wave_height', 'significant wave height']
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(name.lower() in col_lower for name in possible_names):
+                df.rename(columns={col: 'swh'}, inplace=True)
+                break
+        if 'swh' not in df.columns and 'mp1' in df.columns:
+            df.rename(columns={'mp1': 'swh'}, inplace=True)
+    
+    elif data_type == 'tm':
+        possible_names = ['tm', 'Tm', 'TM', 'tp', 'Tp', 'tp (s)', 'Tp (s)', 'mean_wave_period', 'mean wave period', 'mp1']
+        for col in df.columns:
+            col_lower = col.lower()
+            if any(name.lower() in col_lower for name in possible_names):
+                df.rename(columns={col: 'tm'}, inplace=True)
+                break
+        if 'tm' not in df.columns and 'mp1' in df.columns:
+            df.rename(columns={'mp1': 'tm'}, inplace=True)
+    
+    return df
+
+def load_csv_with_date_parsing(file_path):
+    """Load CSV with flexible date parsing"""
+    try:
+        df = pd.read_csv(file_path, parse_dates=['time'], date_format='%Y-%m-%d %H:%M:%S')
+    except:
+        try:
+            df = pd.read_csv(file_path, parse_dates=['time'])
+        except:
+            try:
+                df = pd.read_csv(file_path)
+                if 'time' in df.columns:
+                    df['time'] = pd.to_datetime(df['time'], format='mixed')
+            except:
+                df = pd.read_csv(file_path)
+    return df
+
+def run_gpd_analysis(data, decluster_hours, percentile, data_name):
+    """Run GPD analysis"""
+    threshold = np.percentile(data, percentile)
+    
+    if decluster_hours == 0:
+        exceedances_raw = data[data > threshold]
+        declustered = exceedances_raw
+    else:
+        exceedances_raw = data[data > threshold]
+        declustered = exceedances_raw.resample(f"{decluster_hours}H").max().dropna()
+    
+    exceedances = declustered - threshold
+    
+    if len(exceedances) > 0:
+        xi, loc, beta = genpareto.fit(exceedances)
+    else:
+        xi, loc, beta = np.nan, np.nan, np.nan
+    
+    result = {
+        'threshold': threshold,
+        'declustered': declustered,
+        'exceedances': exceedances,
+        'xi': xi,
+        'beta': beta,
+        'loc': loc,
+        'n_peaks': len(declustered)
     }
-   },
-   "outputs": [],
-   "source": [
-    "\"\"\"\n",
-    "Wave Climate Projection Tool\n",
-    "Professional GUI Application for Wave Climate Analysis under RCP Scenarios\n",
-    "CSV-based version - All data in CSV format\n",
-    "Author: Based on research paper \"Wave Climate Projection under Climate Change Scenarios\"\n",
-    "\"\"\"\n",
-    "\n",
-    "import sys\n",
-    "import os\n",
-    "import numpy as np\n",
-    "import pandas as pd\n",
-    "import matplotlib.pyplot as plt\n",
-    "from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas\n",
-    "from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar\n",
-    "from matplotlib.figure import Figure\n",
-    "from scipy.stats import genpareto, linregress\n",
-    "from sklearn.linear_model import LinearRegression\n",
-    "from datetime import datetime\n",
-    "import warnings\n",
-    "warnings.filterwarnings('ignore')\n",
-    "\n",
-    "from PyQt5.QtWidgets import (\n",
-    "    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,\n",
-    "    QTabWidget, QPushButton, QLabel, QLineEdit, QComboBox,\n",
-    "    QFileDialog, QMessageBox, QGroupBox, QGridLayout, QSpinBox,\n",
-    "    QDoubleSpinBox, QProgressBar, QSplitter, QTextEdit, QCheckBox,\n",
-    "    QScrollArea, QFrame, QSlider, QTableWidget, QTableWidgetItem,\n",
-    "    QHeaderView\n",
-    ")\n",
-    "from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer\n",
-    "from PyQt5.QtGui import QFont, QIcon, QPalette, QColor, QPixmap\n",
-    "\n",
-    "# ============================================================================\n",
-    "# Style Sheet for Modern UI\n",
-    "# ============================================================================\n",
-    "\n",
-    "DARK_STYLE = \"\"\"\n",
-    "QMainWindow {\n",
-    "    background-color: #2b2b2b;\n",
-    "}\n",
-    "QWidget {\n",
-    "    background-color: #2b2b2b;\n",
-    "    color: #ffffff;\n",
-    "    font-family: 'Segoe UI', Arial, sans-serif;\n",
-    "}\n",
-    "QGroupBox {\n",
-    "    font-weight: bold;\n",
-    "    border: 2px solid #555555;\n",
-    "    border-radius: 8px;\n",
-    "    margin-top: 1ex;\n",
-    "    padding-top: 10px;\n",
-    "    background-color: #333333;\n",
-    "}\n",
-    "QGroupBox::title {\n",
-    "    subcontrol-origin: margin;\n",
-    "    left: 10px;\n",
-    "    padding: 0 5px 0 5px;\n",
-    "    color: #ffffff;\n",
-    "}\n",
-    "QPushButton {\n",
-    "    background-color: #4a4a4a;\n",
-    "    border: 1px solid #555555;\n",
-    "    border-radius: 5px;\n",
-    "    padding: 8px;\n",
-    "    font-weight: bold;\n",
-    "    color: #ffffff;\n",
-    "}\n",
-    "QPushButton:hover {\n",
-    "    background-color: #5a5a5a;\n",
-    "    border-color: #777777;\n",
-    "}\n",
-    "QPushButton:pressed {\n",
-    "    background-color: #3a3a3a;\n",
-    "}\n",
-    "QPushButton#primary {\n",
-    "    background-color: #0066cc;\n",
-    "    border-color: #0052a3;\n",
-    "}\n",
-    "QPushButton#primary:hover {\n",
-    "    background-color: #1a75d2;\n",
-    "}\n",
-    "QPushButton#success {\n",
-    "    background-color: #28a745;\n",
-    "    border-color: #1e7e34;\n",
-    "}\n",
-    "QPushButton#success:hover {\n",
-    "    background-color: #34b750;\n",
-    "}\n",
-    "QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QTableWidget {\n",
-    "    background-color: #3a3a3a;\n",
-    "    border: 1px solid #555555;\n",
-    "    border-radius: 4px;\n",
-    "    padding: 5px;\n",
-    "    color: #ffffff;\n",
-    "}\n",
-    "QTableWidget::item:selected {\n",
-    "    background-color: #0066cc;\n",
-    "}\n",
-    "QHeaderView::section {\n",
-    "    background-color: #4a4a4a;\n",
-    "    color: #ffffff;\n",
-    "    padding: 5px;\n",
-    "    border: 1px solid #555555;\n",
-    "}\n",
-    "QComboBox::drop-down {\n",
-    "    border: none;\n",
-    "}\n",
-    "QComboBox::down-arrow {\n",
-    "    image: none;\n",
-    "    border-left: 5px solid none;\n",
-    "    border-right: 5px solid none;\n",
-    "    border-top: 5px solid #ffffff;\n",
-    "    width: 0;\n",
-    "    height: 0;\n",
-    "}\n",
-    "QTabWidget::pane {\n",
-    "    border: 2px solid #555555;\n",
-    "    border-radius: 8px;\n",
-    "    background-color: #333333;\n",
-    "}\n",
-    "QTabBar::tab {\n",
-    "    background-color: #3a3a3a;\n",
-    "    border: 1px solid #555555;\n",
-    "    border-bottom: none;\n",
-    "    border-top-left-radius: 4px;\n",
-    "    border-top-right-radius: 4px;\n",
-    "    padding: 8px 12px;\n",
-    "    margin-right: 2px;\n",
-    "    color: #ffffff;\n",
-    "}\n",
-    "QTabBar::tab:selected {\n",
-    "    background-color: #4a4a4a;\n",
-    "    border-bottom: 2px solid #0066cc;\n",
-    "}\n",
-    "QTabBar::tab:hover {\n",
-    "    background-color: #4a4a4a;\n",
-    "}\n",
-    "QProgressBar {\n",
-    "    border: 2px solid #555555;\n",
-    "    border-radius: 5px;\n",
-    "    text-align: center;\n",
-    "    color: #ffffff;\n",
-    "    background-color: #3a3a3a;\n",
-    "}\n",
-    "QProgressBar::chunk {\n",
-    "    background-color: #0066cc;\n",
-    "    border-radius: 3px;\n",
-    "}\n",
-    "QScrollBar:vertical {\n",
-    "    background-color: #3a3a3a;\n",
-    "    width: 12px;\n",
-    "    border-radius: 6px;\n",
-    "}\n",
-    "QScrollBar::handle:vertical {\n",
-    "    background-color: #666666;\n",
-    "    border-radius: 6px;\n",
-    "    min-height: 20px;\n",
-    "}\n",
-    "QScrollBar::handle:vertical:hover {\n",
-    "    background-color: #888888;\n",
-    "}\n",
-    "QScrollBar:horizontal {\n",
-    "    background-color: #3a3a3a;\n",
-    "    height: 12px;\n",
-    "    border-radius: 6px;\n",
-    "}\n",
-    "QScrollBar::handle:horizontal {\n",
-    "    background-color: #666666;\n",
-    "    border-radius: 6px;\n",
-    "    min-width: 20px;\n",
-    "}\n",
-    "QScrollBar::handle:horizontal:hover {\n",
-    "    background-color: #888888;\n",
-    "}\n",
-    "QCheckBox {\n",
-    "    spacing: 8px;\n",
-    "}\n",
-    "QCheckBox::indicator {\n",
-    "    width: 18px;\n",
-    "    height: 18px;\n",
-    "    border-radius: 3px;\n",
-    "    border: 1px solid #555555;\n",
-    "    background-color: #3a3a3a;\n",
-    "}\n",
-    "QCheckBox::indicator:checked {\n",
-    "    background-color: #0066cc;\n",
-    "    border-color: #0052a3;\n",
-    "}\n",
-    "QSlider::groove:horizontal {\n",
-    "    height: 8px;\n",
-    "    background-color: #3a3a3a;\n",
-    "    border-radius: 4px;\n",
-    "}\n",
-    "QSlider::handle:horizontal {\n",
-    "    background-color: #0066cc;\n",
-    "    width: 18px;\n",
-    "    height: 18px;\n",
-    "    margin: -5px 0;\n",
-    "    border-radius: 9px;\n",
-    "}\n",
-    "QSlider::handle:horizontal:hover {\n",
-    "    background-color: #1a75d2;\n",
-    "}\n",
-    "\"\"\"\n",
-    "\n",
-    "# ============================================================================\n",
-    "# Worker Thread for Long Operations\n",
-    "# ============================================================================\n",
-    "\n",
-    "class AnalysisWorker(QThread):\n",
-    "    \"\"\"Worker thread for running analysis without freezing UI\"\"\"\n",
-    "    progress = pyqtSignal(int)\n",
-    "    status = pyqtSignal(str)\n",
-    "    finished = pyqtSignal(object)\n",
-    "    error = pyqtSignal(str)\n",
-    "    \n",
-    "    def __init__(self, analysis_type, params):\n",
-    "        super().__init__()\n",
-    "        self.analysis_type = analysis_type\n",
-    "        self.params = params\n",
-    "        \n",
-    "    def run(self):\n",
-    "        try:\n",
-    "            if self.analysis_type == 'load_baseline_csv':\n",
-    "                result = self.load_baseline_csv()\n",
-    "            elif self.analysis_type == 'load_projection_csv':\n",
-    "                result = self.load_projection_csv()\n",
-    "            elif self.analysis_type == 'run_gpd':\n",
-    "                result = self.run_gpd_analysis()\n",
-    "            elif self.analysis_type == 'generate_projection':\n",
-    "                result = self.generate_projection()\n",
-    "            elif self.analysis_type == 'merge_csv_files':\n",
-    "                result = self.merge_csv_files()\n",
-    "            else:\n",
-    "                result = None\n",
-    "            \n",
-    "            self.finished.emit(result)\n",
-    "        except Exception as e:\n",
-    "            self.error.emit(str(e))\n",
-    "    \n",
-    "    def standardize_column_names(self, df, data_type):\n",
-    "        \"\"\"Standardize column names to 'swh' or 'tm'\"\"\"\n",
-    "        df = df.copy()\n",
-    "        \n",
-    "        if data_type == 'swh':\n",
-    "            # Look for SWH columns\n",
-    "            possible_names = ['swh', 'SWH', 'hs', 'Hs', 'hs (m)', 'Hs (m)', 'significant_wave_height', 'significant wave height']\n",
-    "            for col in df.columns:\n",
-    "                col_lower = col.lower()\n",
-    "                if any(name.lower() in col_lower for name in possible_names):\n",
-    "                    df.rename(columns={col: 'swh'}, inplace=True)\n",
-    "                    break\n",
-    "            # If still not found, try mp1 (from your code)\n",
-    "            if 'swh' not in df.columns and 'mp1' in df.columns:\n",
-    "                df.rename(columns={'mp1': 'swh'}, inplace=True)\n",
-    "        \n",
-    "        elif data_type == 'tm':\n",
-    "            # Look for Tm columns\n",
-    "            possible_names = ['tm', 'Tm', 'TM', 'tp', 'Tp', 'tp (s)', 'Tp (s)', 'mean_wave_period', 'mean wave period', 'mp1']\n",
-    "            for col in df.columns:\n",
-    "                col_lower = col.lower()\n",
-    "                if any(name.lower() in col_lower for name in possible_names):\n",
-    "                    df.rename(columns={col: 'tm'}, inplace=True)\n",
-    "                    break\n",
-    "            # If still not found, try mp1 (from your code)\n",
-    "            if 'tm' not in df.columns and 'mp1' in df.columns:\n",
-    "                df.rename(columns={'mp1': 'tm'}, inplace=True)\n",
-    "        \n",
-    "        return df\n",
-    "    \n",
-    "    def load_baseline_csv(self):\n",
-    "        \"\"\"Load baseline CSV file with flexible date parsing\"\"\"\n",
-    "        file_path = self.params['file_path']\n",
-    "        data_type = self.params.get('data_type', 'baseline')\n",
-    "        variable = self.params.get('variable', 'swh')\n",
-    "        \n",
-    "        self.status.emit(f\"Loading {data_type} data...\")\n",
-    "        \n",
-    "        # Try multiple date parsing strategies\n",
-    "        try:\n",
-    "            # First try: with specified format\n",
-    "            df = pd.read_csv(file_path, parse_dates=['time'], date_format='%Y-%m-%d %H:%M:%S')\n",
-    "        except:\n",
-    "            try:\n",
-    "                # Second try: let pandas infer\n",
-    "                df = pd.read_csv(file_path, parse_dates=['time'])\n",
-    "            except:\n",
-    "                try:\n",
-    "                    # Third try: read without parsing, then convert\n",
-    "                    df = pd.read_csv(file_path)\n",
-    "                    if 'time' in df.columns:\n",
-    "                        df['time'] = pd.to_datetime(df['time'], format='mixed')\n",
-    "                except:\n",
-    "                    # Fourth try: just read and let user handle\n",
-    "                    df = pd.read_csv(file_path)\n",
-    "        \n",
-    "        # Standardize column names\n",
-    "        df = self.standardize_column_names(df, variable)\n",
-    "        \n",
-    "        # Check if required column exists\n",
-    "        if variable not in df.columns:\n",
-    "            self.status.emit(f\"Warning: Could not find {variable.upper()} column. Available columns: {list(df.columns)}\")\n",
-    "        \n",
-    "        self.status.emit(f\"Loaded {data_type} data: {len(df)} records\")\n",
-    "        return df\n",
-    "    \n",
-    "    def load_projection_csv(self):\n",
-    "        \"\"\"Load projection CSV file with flexible date parsing\"\"\"\n",
-    "        file_path = self.params['file_path']\n",
-    "        data_type = self.params.get('data_type', 'projection')\n",
-    "        variable = self.params.get('variable', 'swh')\n",
-    "        \n",
-    "        self.status.emit(f\"Loading {data_type} data...\")\n",
-    "        \n",
-    "        # Try multiple date parsing strategies\n",
-    "        try:\n",
-    "            # First try: with specified format\n",
-    "            df = pd.read_csv(file_path, parse_dates=['time'], date_format='%Y-%m-%d %H:%M:%S')\n",
-    "        except:\n",
-    "            try:\n",
-    "                # Second try: let pandas infer\n",
-    "                df = pd.read_csv(file_path, parse_dates=['time'])\n",
-    "            except:\n",
-    "                try:\n",
-    "                    # Third try: read without parsing, then convert\n",
-    "                    df = pd.read_csv(file_path)\n",
-    "                    if 'time' in df.columns:\n",
-    "                        df['time'] = pd.to_datetime(df['time'], format='mixed')\n",
-    "                except:\n",
-    "                    # Fourth try: just read and let user handle\n",
-    "                    df = pd.read_csv(file_path)\n",
-    "        \n",
-    "        # Standardize column names\n",
-    "        df = self.standardize_column_names(df, variable)\n",
-    "        \n",
-    "        # Check if required column exists\n",
-    "        if variable not in df.columns:\n",
-    "            self.status.emit(f\"Warning: Could not find {variable.upper()} column. Available columns: {list(df.columns)}\")\n",
-    "        \n",
-    "        self.status.emit(f\"Loaded {data_type} data: {len(df)} records\")\n",
-    "        return df\n",
-    "    \n",
-    "    def merge_csv_files(self):\n",
-    "        \"\"\"Merge multiple CSV files from a folder\"\"\"\n",
-    "        folder_path = self.params['folder_path']\n",
-    "        data_type = self.params.get('data_type', 'merged')\n",
-    "        variable = self.params.get('variable', 'swh')\n",
-    "        \n",
-    "        self.status.emit(f\"Merging CSV files for {data_type} from {folder_path}...\")\n",
-    "        \n",
-    "        csv_files = sorted([f for f in os.listdir(folder_path) if f.endswith('.csv')])\n",
-    "        all_data = []\n",
-    "        \n",
-    "        for i, file in enumerate(csv_files):\n",
-    "            file_path = os.path.join(folder_path, file)\n",
-    "            try:\n",
-    "                # Try with date parsing\n",
-    "                df = pd.read_csv(file_path, parse_dates=['time'])\n",
-    "            except:\n",
-    "                try:\n",
-    "                    # If that fails, read without parsing\n",
-    "                    df = pd.read_csv(file_path)\n",
-    "                    if 'time' in df.columns:\n",
-    "                        df['time'] = pd.to_datetime(df['time'], format='mixed')\n",
-    "                except:\n",
-    "                    df = pd.read_csv(file_path)\n",
-    "            \n",
-    "            # Standardize column names\n",
-    "            df = self.standardize_column_names(df, variable)\n",
-    "            all_data.append(df)\n",
-    "            \n",
-    "            self.progress.emit(int((i + 1) / len(csv_files) * 100))\n",
-    "        \n",
-    "        if all_data:\n",
-    "            merged_df = pd.concat(all_data, ignore_index=True)\n",
-    "            self.status.emit(f\"Merged {len(csv_files)} files, total {len(merged_df)} records\")\n",
-    "            return merged_df\n",
-    "        else:\n",
-    "            self.status.emit(\"No data files found\")\n",
-    "            return None\n",
-    "    \n",
-    "    def run_gpd_analysis(self):\n",
-    "        \"\"\"Run GPD analysis\"\"\"\n",
-    "        data = self.params['data']\n",
-    "        decluster_hours = self.params['decluster_hours']\n",
-    "        percentile = self.params['percentile']\n",
-    "        data_name = self.params.get('data_name', 'Unknown')\n",
-    "        \n",
-    "        self.status.emit(f\"Running GPD analysis for {data_name}...\")\n",
-    "        \n",
-    "        threshold = np.percentile(data, percentile)\n",
-    "        \n",
-    "        if decluster_hours == 0:\n",
-    "            exceedances_raw = data[data > threshold]\n",
-    "            declustered = exceedances_raw\n",
-    "        else:\n",
-    "            exceedances_raw = data[data > threshold]\n",
-    "            # Resample to decluster\n",
-    "            declustered = exceedances_raw.resample(f\"{decluster_hours}H\").max().dropna()\n",
-    "        \n",
-    "        exceedances = declustered - threshold\n",
-    "        \n",
-    "        if len(exceedances) > 0:\n",
-    "            xi, loc, beta = genpareto.fit(exceedances)\n",
-    "        else:\n",
-    "            xi, loc, beta = np.nan, np.nan, np.nan\n",
-    "        \n",
-    "        result = {\n",
-    "            'threshold': threshold,\n",
-    "            'declustered': declustered,\n",
-    "            'exceedances': exceedances,\n",
-    "            'xi': xi,\n",
-    "            'beta': beta,\n",
-    "            'loc': loc,\n",
-    "            'n_peaks': len(declustered)\n",
-    "        }\n",
-    "        \n",
-    "        self.status.emit(f\"GPD analysis complete. Found {len(declustered)} peaks\")\n",
-    "        return result\n",
-    "    \n",
-    "    def generate_projection(self):\n",
-    "        \"\"\"Generate projected time series using slope-based scaling\"\"\"\n",
-    "        df_obs = self.params['df_obs']\n",
-    "        df_proj = self.params['df_proj']\n",
-    "        scenario = self.params.get('scenario', 'rcp45')\n",
-    "        variable = self.params.get('variable', 'swh')\n",
-    "        \n",
-    "        self.status.emit(f\"Generating projections for {scenario} - {variable}...\")\n",
-    "        \n",
-    "        # Check if required columns exist\n",
-    "        if variable not in df_obs.columns:\n",
-    "            self.status.emit(f\"Error: Column '{variable}' not found in baseline data\")\n",
-    "            return None\n",
-    "        \n",
-    "        if variable not in df_proj.columns:\n",
-    "            self.status.emit(f\"Error: Column '{variable}' not found in projection data\")\n",
-    "            return None\n",
-    "        \n",
-    "        # Get projection years\n",
-    "        df_proj['time'] = pd.to_datetime(df_proj['time'])\n",
-    "        years = df_proj['time'].dt.year.unique()\n",
-    "        years.sort()\n",
-    "        \n",
-    "        projected_data = []\n",
-    "        total_years = len(years)\n",
-    "        \n",
-    "        for i, year in enumerate(years):\n",
-    "            df_year = df_proj[df_proj['time'].dt.year == year].copy()\n",
-    "            \n",
-    "            if len(df_year) < 2:\n",
-    "                continue\n",
-    "            \n",
-    "            # Create time index for projected data\n",
-    "            time_index = pd.date_range(\n",
-    "                start=f\"{year}-01-01 00:00:00\",\n",
-    "                periods=len(df_year),\n",
-    "                freq='H'\n",
-    "            )[:len(df_year)]\n",
-    "            \n",
-    "            year_df = pd.DataFrame({\n",
-    "                'time': time_index,\n",
-    "                variable: df_year[variable].values[:len(time_index)],\n",
-    "                'scenario': scenario,\n",
-    "                'variable': variable\n",
-    "            })\n",
-    "            \n",
-    "            projected_data.append(year_df)\n",
-    "            self.progress.emit(int((i + 1) / total_years * 100))\n",
-    "        \n",
-    "        if projected_data:\n",
-    "            result_df = pd.concat(projected_data, ignore_index=True)\n",
-    "            self.status.emit(f\"Generated {len(result_df)} projected records for {scenario} - {variable}\")\n",
-    "            return result_df\n",
-    "        else:\n",
-    "            self.status.emit(f\"No projection data generated for {scenario} - {variable}\")\n",
-    "            return None\n",
-    "\n",
-    "\n",
-    "# ============================================================================\n",
-    "# Main Application Window\n",
-    "# ============================================================================\n",
-    "\n",
-    "class WaveClimateApp(QMainWindow):\n",
-    "    def __init__(self):\n",
-    "        super().__init__()\n",
-    "        self.setWindowTitle(\"Wave Climate Projection Tool v1.0 - CSV Edition\")\n",
-    "        self.setGeometry(100, 100, 1400, 900)\n",
-    "        \n",
-    "        # Apply dark theme\n",
-    "        self.setStyleSheet(DARK_STYLE)\n",
-    "        \n",
-    "        # Data storage - Structured by type\n",
-    "        self.baseline_data = {\n",
-    "            'swh': None,  # Baseline SWH data\n",
-    "            'tm': None    # Baseline Tm data\n",
-    "        }\n",
-    "        \n",
-    "        self.projection_data = {\n",
-    "            'swh': {\n",
-    "                'rcp45': None,  # RCP 4.5 SWH projections\n",
-    "                'rcp85': None   # RCP 8.5 SWH projections\n",
-    "            },\n",
-    "            'tm': {\n",
-    "                'rcp45': None,  # RCP 4.5 Tm projections\n",
-    "                'rcp85': None   # RCP 8.5 Tm projections\n",
-    "            }\n",
-    "        }\n",
-    "        \n",
-    "        self.gpd_results = {\n",
-    "            'swh': {'rcp45': None, 'rcp85': None},\n",
-    "            'tm': {'rcp45': None, 'rcp85': None}\n",
-    "        }\n",
-    "        \n",
-    "        self.projected_series = {\n",
-    "            'swh': {'rcp45': None, 'rcp85': None},\n",
-    "            'tm': {'rcp45': None, 'rcp85': None}\n",
-    "        }\n",
-    "        \n",
-    "        self.test_data = None\n",
-    "        \n",
-    "        # For sequential projections\n",
-    "        self.projection_results = []\n",
-    "        self.remaining_scenarios = []\n",
-    "        self.current_variable = None\n",
-    "        \n",
-    "        # File paths storage\n",
-    "        self.file_paths = {\n",
-    "            'baseline_swh': '',\n",
-    "            'baseline_tm': '',\n",
-    "            'rcp45_swh': '',\n",
-    "            'rcp45_tm': '',\n",
-    "            'rcp85_swh': '',\n",
-    "            'rcp85_tm': ''\n",
-    "        }\n",
-    "        \n",
-    "        # Folder paths for merging\n",
-    "        self.folder_paths = {\n",
-    "            'rcp45_swh': '',\n",
-    "            'rcp45_tm': '',\n",
-    "            'rcp85_swh': '',\n",
-    "            'rcp85_tm': ''\n",
-    "        }\n",
-    "        \n",
-    "        # Initialize UI\n",
-    "        self.init_ui()\n",
-    "        \n",
-    "        # Show welcome message\n",
-    "        self.show_welcome()\n",
-    "    \n",
-    "    def init_ui(self):\n",
-    "        \"\"\"Initialize the user interface\"\"\"\n",
-    "        \n",
-    "        # Central widget\n",
-    "        central_widget = QWidget()\n",
-    "        self.setCentralWidget(central_widget)\n",
-    "        \n",
-    "        # Main layout\n",
-    "        main_layout = QVBoxLayout(central_widget)\n",
-    "        \n",
-    "        # Header\n",
-    "        header = self.create_header()\n",
-    "        main_layout.addWidget(header)\n",
-    "        \n",
-    "        # Tab widget\n",
-    "        self.tabs = QTabWidget()\n",
-    "        main_layout.addWidget(self.tabs)\n",
-    "        \n",
-    "        # Create tabs\n",
-    "        self.create_data_tab()\n",
-    "        self.create_gpd_tab()\n",
-    "        self.create_projection_tab()\n",
-    "        self.create_results_tab()\n",
-    "        \n",
-    "        # Status bar\n",
-    "        self.status_bar = self.statusBar()\n",
-    "        self.status_bar.showMessage(\"Ready\")\n",
-    "        \n",
-    "        # Progress bar\n",
-    "        self.progress_bar = QProgressBar()\n",
-    "        self.progress_bar.setMaximumWidth(200)\n",
-    "        self.progress_bar.hide()\n",
-    "        self.status_bar.addPermanentWidget(self.progress_bar)\n",
-    "    \n",
-    "    def create_header(self):\n",
-    "        \"\"\"Create application header\"\"\"\n",
-    "        header = QFrame()\n",
-    "        header.setFrameStyle(QFrame.StyledPanel)\n",
-    "        header.setMaximumHeight(80)\n",
-    "        \n",
-    "        layout = QHBoxLayout(header)\n",
-    "        \n",
-    "        # Logo/title\n",
-    "        title = QLabel(\"🌊 Wave Climate Projection Tool\")\n",
-    "        title.setFont(QFont(\"Segoe UI\", 18, QFont.Bold))\n",
-    "        title.setStyleSheet(\"color: #0066cc;\")\n",
-    "        layout.addWidget(title)\n",
-    "        \n",
-    "        layout.addStretch()\n",
-    "        \n",
-    "        # Version\n",
-    "        version = QLabel(\"v1.0 | CSV Edition | RCP4.5/RCP8.5\")\n",
-    "        version.setFont(QFont(\"Segoe UI\", 10))\n",
-    "        version.setStyleSheet(\"color: #888888;\")\n",
-    "        layout.addWidget(version)\n",
-    "        \n",
-    "        return header\n",
-    "    \n",
-    "    def create_data_tab(self):\n",
-    "        \"\"\"Create data loading tab with structured data types\"\"\"\n",
-    "        tab = QWidget()\n",
-    "        layout = QVBoxLayout(tab)\n",
-    "        \n",
-    "        # Scroll area for all content\n",
-    "        scroll = QScrollArea()\n",
-    "        scroll.setWidgetResizable(True)\n",
-    "        scroll.setFrameShape(QFrame.NoFrame)\n",
-    "        layout.addWidget(scroll)\n",
-    "        \n",
-    "        scroll_content = QWidget()\n",
-    "        scroll_layout = QVBoxLayout(scroll_content)\n",
-    "        scroll.setWidget(scroll_content)\n",
-    "        \n",
-    "        # ==================== Baseline Data Section ====================\n",
-    "        baseline_group = QGroupBox(\"📊 Baseline Data (2005)\")\n",
-    "        baseline_layout = QGridLayout()\n",
-    "        \n",
-    "        # Baseline SWH\n",
-    "        baseline_layout.addWidget(QLabel(\"Significant Wave Height (SWH):\"), 0, 0)\n",
-    "        self.baseline_swh_path = QLineEdit()\n",
-    "        self.baseline_swh_path.setReadOnly(True)\n",
-    "        baseline_layout.addWidget(self.baseline_swh_path, 0, 1, 1, 3)\n",
-    "        \n",
-    "        self.baseline_swh_browse = QPushButton(\"Browse CSV...\")\n",
-    "        self.baseline_swh_browse.clicked.connect(lambda: self.browse_file('baseline_swh'))\n",
-    "        baseline_layout.addWidget(self.baseline_swh_browse, 0, 4)\n",
-    "        \n",
-    "        self.load_baseline_swh_btn = QPushButton(\"Load Baseline SWH\")\n",
-    "        self.load_baseline_swh_btn.setObjectName(\"primary\")\n",
-    "        self.load_baseline_swh_btn.clicked.connect(lambda: self.load_baseline_data('swh'))\n",
-    "        baseline_layout.addWidget(self.load_baseline_swh_btn, 0, 5)\n",
-    "        \n",
-    "        # Baseline Tm\n",
-    "        baseline_layout.addWidget(QLabel(\"Mean Wave Period (Tm):\"), 1, 0)\n",
-    "        self.baseline_tm_path = QLineEdit()\n",
-    "        self.baseline_tm_path.setReadOnly(True)\n",
-    "        baseline_layout.addWidget(self.baseline_tm_path, 1, 1, 1, 3)\n",
-    "        \n",
-    "        self.baseline_tm_browse = QPushButton(\"Browse CSV...\")\n",
-    "        self.baseline_tm_browse.clicked.connect(lambda: self.browse_file('baseline_tm'))\n",
-    "        baseline_layout.addWidget(self.baseline_tm_browse, 1, 4)\n",
-    "        \n",
-    "        self.load_baseline_tm_btn = QPushButton(\"Load Baseline Tm\")\n",
-    "        self.load_baseline_tm_btn.setObjectName(\"primary\")\n",
-    "        self.load_baseline_tm_btn.clicked.connect(lambda: self.load_baseline_data('tm'))\n",
-    "        baseline_layout.addWidget(self.load_baseline_tm_btn, 1, 5)\n",
-    "        \n",
-    "        baseline_group.setLayout(baseline_layout)\n",
-    "        scroll_layout.addWidget(baseline_group)\n",
-    "        \n",
-    "        # ==================== RCP 4.5 Data Section ====================\n",
-    "        rcp45_group = QGroupBox(\"🔵 RCP 4.5 Projection Data (2041-2100)\")\n",
-    "        rcp45_layout = QGridLayout()\n",
-    "        \n",
-    "        # RCP 4.5 SWH\n",
-    "        rcp45_layout.addWidget(QLabel(\"Significant Wave Height (SWH):\"), 0, 0)\n",
-    "        \n",
-    "        self.rcp45_swh_path = QLineEdit()\n",
-    "        self.rcp45_swh_path.setReadOnly(True)\n",
-    "        rcp45_layout.addWidget(self.rcp45_swh_path, 0, 1, 1, 2)\n",
-    "        \n",
-    "        self.rcp45_swh_browse_file = QPushButton(\"Browse CSV\")\n",
-    "        self.rcp45_swh_browse_file.clicked.connect(lambda: self.browse_file('rcp45_swh'))\n",
-    "        rcp45_layout.addWidget(self.rcp45_swh_browse_file, 0, 3)\n",
-    "        \n",
-    "        self.rcp45_swh_browse_folder = QPushButton(\"Browse Folder\")\n",
-    "        self.rcp45_swh_browse_folder.clicked.connect(lambda: self.browse_folder('rcp45_swh'))\n",
-    "        rcp45_layout.addWidget(self.rcp45_swh_browse_folder, 0, 4)\n",
-    "        \n",
-    "        self.rcp45_swh_merge_btn = QPushButton(\"Merge CSVs\")\n",
-    "        self.rcp45_swh_merge_btn.clicked.connect(lambda: self.merge_projection_files('rcp45_swh', 'swh'))\n",
-    "        rcp45_layout.addWidget(self.rcp45_swh_merge_btn, 0, 5)\n",
-    "        \n",
-    "        self.load_rcp45_swh_btn = QPushButton(\"Load RCP 4.5 SWH\")\n",
-    "        self.load_rcp45_swh_btn.setObjectName(\"primary\")\n",
-    "        self.load_rcp45_swh_btn.clicked.connect(lambda: self.load_projection_data('swh', 'rcp45'))\n",
-    "        rcp45_layout.addWidget(self.load_rcp45_swh_btn, 0, 6)\n",
-    "        \n",
-    "        # RCP 4.5 Tm\n",
-    "        rcp45_layout.addWidget(QLabel(\"Mean Wave Period (Tm):\"), 1, 0)\n",
-    "        \n",
-    "        self.rcp45_tm_path = QLineEdit()\n",
-    "        self.rcp45_tm_path.setReadOnly(True)\n",
-    "        rcp45_layout.addWidget(self.rcp45_tm_path, 1, 1, 1, 2)\n",
-    "        \n",
-    "        self.rcp45_tm_browse_file = QPushButton(\"Browse CSV\")\n",
-    "        self.rcp45_tm_browse_file.clicked.connect(lambda: self.browse_file('rcp45_tm'))\n",
-    "        rcp45_layout.addWidget(self.rcp45_tm_browse_file, 1, 3)\n",
-    "        \n",
-    "        self.rcp45_tm_browse_folder = QPushButton(\"Browse Folder\")\n",
-    "        self.rcp45_tm_browse_folder.clicked.connect(lambda: self.browse_folder('rcp45_tm'))\n",
-    "        rcp45_layout.addWidget(self.rcp45_tm_browse_folder, 1, 4)\n",
-    "        \n",
-    "        self.rcp45_tm_merge_btn = QPushButton(\"Merge CSVs\")\n",
-    "        self.rcp45_tm_merge_btn.clicked.connect(lambda: self.merge_projection_files('rcp45_tm', 'tm'))\n",
-    "        rcp45_layout.addWidget(self.rcp45_tm_merge_btn, 1, 5)\n",
-    "        \n",
-    "        self.load_rcp45_tm_btn = QPushButton(\"Load RCP 4.5 Tm\")\n",
-    "        self.load_rcp45_tm_btn.setObjectName(\"primary\")\n",
-    "        self.load_rcp45_tm_btn.clicked.connect(lambda: self.load_projection_data('tm', 'rcp45'))\n",
-    "        rcp45_layout.addWidget(self.load_rcp45_tm_btn, 1, 6)\n",
-    "        \n",
-    "        rcp45_group.setLayout(rcp45_layout)\n",
-    "        scroll_layout.addWidget(rcp45_group)\n",
-    "        \n",
-    "        # ==================== RCP 8.5 Data Section ====================\n",
-    "        rcp85_group = QGroupBox(\"🔴 RCP 8.5 Projection Data (2041-2100)\")\n",
-    "        rcp85_layout = QGridLayout()\n",
-    "        \n",
-    "        # RCP 8.5 SWH\n",
-    "        rcp85_layout.addWidget(QLabel(\"Significant Wave Height (SWH):\"), 0, 0)\n",
-    "        \n",
-    "        self.rcp85_swh_path = QLineEdit()\n",
-    "        self.rcp85_swh_path.setReadOnly(True)\n",
-    "        rcp85_layout.addWidget(self.rcp85_swh_path, 0, 1, 1, 2)\n",
-    "        \n",
-    "        self.rcp85_swh_browse_file = QPushButton(\"Browse CSV\")\n",
-    "        self.rcp85_swh_browse_file.clicked.connect(lambda: self.browse_file('rcp85_swh'))\n",
-    "        rcp85_layout.addWidget(self.rcp85_swh_browse_file, 0, 3)\n",
-    "        \n",
-    "        self.rcp85_swh_browse_folder = QPushButton(\"Browse Folder\")\n",
-    "        self.rcp85_swh_browse_folder.clicked.connect(lambda: self.browse_folder('rcp85_swh'))\n",
-    "        rcp85_layout.addWidget(self.rcp85_swh_browse_folder, 0, 4)\n",
-    "        \n",
-    "        self.rcp85_swh_merge_btn = QPushButton(\"Merge CSVs\")\n",
-    "        self.rcp85_swh_merge_btn.clicked.connect(lambda: self.merge_projection_files('rcp85_swh', 'swh'))\n",
-    "        rcp85_layout.addWidget(self.rcp85_swh_merge_btn, 0, 5)\n",
-    "        \n",
-    "        self.load_rcp85_swh_btn = QPushButton(\"Load RCP 8.5 SWH\")\n",
-    "        self.load_rcp85_swh_btn.setObjectName(\"primary\")\n",
-    "        self.load_rcp85_swh_btn.clicked.connect(lambda: self.load_projection_data('swh', 'rcp85'))\n",
-    "        rcp85_layout.addWidget(self.load_rcp85_swh_btn, 0, 6)\n",
-    "        \n",
-    "        # RCP 8.5 Tm\n",
-    "        rcp85_layout.addWidget(QLabel(\"Mean Wave Period (Tm):\"), 1, 0)\n",
-    "        \n",
-    "        self.rcp85_tm_path = QLineEdit()\n",
-    "        self.rcp85_tm_path.setReadOnly(True)\n",
-    "        rcp85_layout.addWidget(self.rcp85_tm_path, 1, 1, 1, 2)\n",
-    "        \n",
-    "        self.rcp85_tm_browse_file = QPushButton(\"Browse CSV\")\n",
-    "        self.rcp85_tm_browse_file.clicked.connect(lambda: self.browse_file('rcp85_tm'))\n",
-    "        rcp85_layout.addWidget(self.rcp85_tm_browse_file, 1, 3)\n",
-    "        \n",
-    "        self.rcp85_tm_browse_folder = QPushButton(\"Browse Folder\")\n",
-    "        self.rcp85_tm_browse_folder.clicked.connect(lambda: self.browse_folder('rcp85_tm'))\n",
-    "        rcp85_layout.addWidget(self.rcp85_tm_browse_folder, 1, 4)\n",
-    "        \n",
-    "        self.rcp85_tm_merge_btn = QPushButton(\"Merge CSVs\")\n",
-    "        self.rcp85_tm_merge_btn.clicked.connect(lambda: self.merge_projection_files('rcp85_tm', 'tm'))\n",
-    "        rcp85_layout.addWidget(self.rcp85_tm_merge_btn, 1, 5)\n",
-    "        \n",
-    "        self.load_rcp85_tm_btn = QPushButton(\"Load RCP 8.5 Tm\")\n",
-    "        self.load_rcp85_tm_btn.setObjectName(\"primary\")\n",
-    "        self.load_rcp85_tm_btn.clicked.connect(lambda: self.load_projection_data('tm', 'rcp85'))\n",
-    "        rcp85_layout.addWidget(self.load_rcp85_tm_btn, 1, 6)\n",
-    "        \n",
-    "        rcp85_group.setLayout(rcp85_layout)\n",
-    "        scroll_layout.addWidget(rcp85_group)\n",
-    "        \n",
-    "        # ==================== Test Data Section ====================\n",
-    "        test_group = QGroupBox(\"🧪 Test Data (e.g., Brisbane 2024)\")\n",
-    "        test_layout = QGridLayout()\n",
-    "        \n",
-    "        test_layout.addWidget(QLabel(\"CSV File:\"), 0, 0)\n",
-    "        self.test_path = QLineEdit()\n",
-    "        self.test_path.setReadOnly(True)\n",
-    "        test_layout.addWidget(self.test_path, 0, 1, 1, 4)\n",
-    "        \n",
-    "        self.test_browse = QPushButton(\"Browse...\")\n",
-    "        self.test_browse.clicked.connect(lambda: self.browse_file('test'))\n",
-    "        test_layout.addWidget(self.test_browse, 0, 5)\n",
-    "        \n",
-    "        self.load_test_btn = QPushButton(\"Load Test Data\")\n",
-    "        self.load_test_btn.setObjectName(\"primary\")\n",
-    "        self.load_test_btn.clicked.connect(self.load_test_data)\n",
-    "        test_layout.addWidget(self.load_test_btn, 0, 6)\n",
-    "        \n",
-    "        test_group.setLayout(test_layout)\n",
-    "        scroll_layout.addWidget(test_group)\n",
-    "        \n",
-    "        # ==================== Data Preview ====================\n",
-    "        preview_group = QGroupBox(\"📋 Data Preview\")\n",
-    "        preview_layout = QVBoxLayout()\n",
-    "        \n",
-    "        # Current data info\n",
-    "        self.current_data_info = QLabel(\"No data loaded\")\n",
-    "        self.current_data_info.setStyleSheet(\"color: #888888; padding: 5px;\")\n",
-    "        preview_layout.addWidget(self.current_data_info)\n",
-    "        \n",
-    "        # Table for data preview\n",
-    "        self.preview_table = QTableWidget()\n",
-    "        self.preview_table.setAlternatingRowColors(True)\n",
-    "        self.preview_table.horizontalHeader().setStretchLastSection(True)\n",
-    "        self.preview_table.setEditTriggers(QTableWidget.NoEditTriggers)\n",
-    "        preview_layout.addWidget(self.preview_table)\n",
-    "        \n",
-    "        preview_group.setLayout(preview_layout)\n",
-    "        scroll_layout.addWidget(preview_group)\n",
-    "        \n",
-    "        tab.setLayout(layout)\n",
-    "        self.tabs.addTab(tab, \"📁 Data Loading\")\n",
-    "    \n",
-    "    def create_gpd_tab(self):\n",
-    "        \"\"\"Create GPD analysis tab - Fixed SWH plot\"\"\"\n",
-    "        tab = QWidget()\n",
-    "        layout = QVBoxLayout(tab)\n",
-    "        \n",
-    "        # Controls\n",
-    "        controls_group = QGroupBox(\"⚙️ GPD Analysis Settings\")\n",
-    "        controls_layout = QGridLayout()\n",
-    "        \n",
-    "        controls_layout.addWidget(QLabel(\"Variable:\"), 0, 0)\n",
-    "        self.gpd_variable = QComboBox()\n",
-    "        self.gpd_variable.addItems([\"Significant Wave Height (SWH)\", \"Mean Wave Period (Tm)\"])\n",
-    "        controls_layout.addWidget(self.gpd_variable, 0, 1)\n",
-    "        \n",
-    "        controls_layout.addWidget(QLabel(\"Scenario:\"), 0, 2)\n",
-    "        self.gpd_scenario = QComboBox()\n",
-    "        self.gpd_scenario.addItems([\"RCP 4.5\", \"RCP 8.5\"])\n",
-    "        controls_layout.addWidget(self.gpd_scenario, 0, 3)\n",
-    "        \n",
-    "        controls_layout.addWidget(QLabel(\"Decluster Hours:\"), 1, 0)\n",
-    "        self.decluster_hours = QSpinBox()\n",
-    "        self.decluster_hours.setRange(0, 72)\n",
-    "        self.decluster_hours.setValue(12)\n",
-    "        self.decluster_hours.setSuffix(\" h\")\n",
-    "        controls_layout.addWidget(self.decluster_hours, 1, 1)\n",
-    "        \n",
-    "        controls_layout.addWidget(QLabel(\"Threshold Percentile:\"), 1, 2)\n",
-    "        self.threshold_percentile = QDoubleSpinBox()\n",
-    "        self.threshold_percentile.setRange(90, 99.9)\n",
-    "        self.threshold_percentile.setValue(99.5)\n",
-    "        self.threshold_percentile.setDecimals(1)\n",
-    "        self.threshold_percentile.setSuffix(\"%\")\n",
-    "        controls_layout.addWidget(self.threshold_percentile, 1, 3)\n",
-    "        \n",
-    "        self.run_gpd_btn = QPushButton(\"🎯 Run GPD Analysis\")\n",
-    "        self.run_gpd_btn.setObjectName(\"success\")\n",
-    "        self.run_gpd_btn.clicked.connect(self.run_gpd_analysis)\n",
-    "        controls_layout.addWidget(self.run_gpd_btn, 2, 0, 1, 4)\n",
-    "        \n",
-    "        controls_group.setLayout(controls_layout)\n",
-    "        layout.addWidget(controls_group)\n",
-    "        \n",
-    "        # Results display with two figures\n",
-    "        splitter = QSplitter(Qt.Vertical)\n",
-    "        \n",
-    "        # Top figure - Time series with peaks (Fixed SWH plot)\n",
-    "        top_widget = QWidget()\n",
-    "        top_layout = QVBoxLayout(top_widget)\n",
-    "        \n",
-    "        self.gpd_figure1 = Figure(figsize=(10, 3.5), facecolor='#333333')\n",
-    "        self.gpd_canvas1 = FigureCanvas(self.gpd_figure1)\n",
-    "        self.gpd_toolbar1 = NavigationToolbar(self.gpd_canvas1, self)\n",
-    "        top_layout.addWidget(self.gpd_toolbar1)\n",
-    "        top_layout.addWidget(self.gpd_canvas1)\n",
-    "        \n",
-    "        splitter.addWidget(top_widget)\n",
-    "        \n",
-    "        # Bottom figure - GPD fit\n",
-    "        bottom_widget = QWidget()\n",
-    "        bottom_layout = QVBoxLayout(bottom_widget)\n",
-    "        \n",
-    "        self.gpd_figure2 = Figure(figsize=(10, 3.5), facecolor='#333333')\n",
-    "        self.gpd_canvas2 = FigureCanvas(self.gpd_figure2)\n",
-    "        self.gpd_toolbar2 = NavigationToolbar(self.gpd_canvas2, self)\n",
-    "        bottom_layout.addWidget(self.gpd_toolbar2)\n",
-    "        bottom_layout.addWidget(self.gpd_canvas2)\n",
-    "        \n",
-    "        splitter.addWidget(bottom_widget)\n",
-    "        \n",
-    "        layout.addWidget(splitter)\n",
-    "        \n",
-    "        # Results text\n",
-    "        self.gpd_results_text = QTextEdit()\n",
-    "        self.gpd_results_text.setReadOnly(True)\n",
-    "        self.gpd_results_text.setMaximumHeight(100)\n",
-    "        self.gpd_results_text.setFont(QFont(\"Courier New\", 10))\n",
-    "        layout.addWidget(self.gpd_results_text)\n",
-    "        \n",
-    "        tab.setLayout(layout)\n",
-    "        self.tabs.addTab(tab, \"🎯 GPD Analysis\")\n",
-    "    \n",
-    "    def create_projection_tab(self):\n",
-    "        \"\"\"Create projection generation tab\"\"\"\n",
-    "        tab = QWidget()\n",
-    "        layout = QVBoxLayout(tab)\n",
-    "        \n",
-    "        # Controls\n",
-    "        controls_group = QGroupBox(\"⚙️ Generate Projections\")\n",
-    "        controls_layout = QGridLayout()\n",
-    "        \n",
-    "        controls_layout.addWidget(QLabel(\"Variable:\"), 0, 0)\n",
-    "        self.proj_variable = QComboBox()\n",
-    "        self.proj_variable.addItems([\"Significant Wave Height (SWH)\", \"Mean Wave Period (Tm)\"])\n",
-    "        controls_layout.addWidget(self.proj_variable, 0, 1)\n",
-    "        \n",
-    "        controls_layout.addWidget(QLabel(\"Scenario:\"), 0, 2)\n",
-    "        self.proj_scenario = QComboBox()\n",
-    "        self.proj_scenario.addItems([\"RCP 4.5\", \"RCP 8.5\", \"Both\"])\n",
-    "        controls_layout.addWidget(self.proj_scenario, 0, 3)\n",
-    "        \n",
-    "        self.generate_proj_btn = QPushButton(\"🔄 Generate Projections\")\n",
-    "        self.generate_proj_btn.setObjectName(\"success\")\n",
-    "        self.generate_proj_btn.clicked.connect(self.generate_projections)\n",
-    "        controls_layout.addWidget(self.generate_proj_btn, 1, 0, 1, 4)\n",
-    "        \n",
-    "        controls_group.setLayout(controls_layout)\n",
-    "        layout.addWidget(controls_group)\n",
-    "        \n",
-    "        # Figure for projections\n",
-    "        self.proj_figure = Figure(figsize=(12, 5), facecolor='#333333')\n",
-    "        self.proj_canvas = FigureCanvas(self.proj_figure)\n",
-    "        self.proj_toolbar = NavigationToolbar(self.proj_canvas, self)\n",
-    "        layout.addWidget(self.proj_toolbar)\n",
-    "        layout.addWidget(self.proj_canvas)\n",
-    "        \n",
-    "        # Long-term trend figure\n",
-    "        self.trend_figure = Figure(figsize=(12, 4), facecolor='#333333')\n",
-    "        self.trend_canvas = FigureCanvas(self.trend_figure)\n",
-    "        layout.addWidget(self.trend_canvas)\n",
-    "        \n",
-    "        # Projection info text\n",
-    "        self.proj_info_text = QTextEdit()\n",
-    "        self.proj_info_text.setReadOnly(True)\n",
-    "        self.proj_info_text.setMaximumHeight(100)\n",
-    "        self.proj_info_text.setFont(QFont(\"Courier New\", 10))\n",
-    "        self.proj_info_text.setPlaceholderText(\"Projection information will appear here...\")\n",
-    "        layout.addWidget(self.proj_info_text)\n",
-    "        \n",
-    "        tab.setLayout(layout)\n",
-    "        self.tabs.addTab(tab, \"🔄 Projections\")\n",
-    "    \n",
-    "    def create_results_tab(self):\n",
-    "        \"\"\"Create results summary tab\"\"\"\n",
-    "        tab = QWidget()\n",
-    "        layout = QVBoxLayout(tab)\n",
-    "        \n",
-    "        # Export controls\n",
-    "        export_group = QGroupBox(\"💾 Export Results\")\n",
-    "        export_layout = QHBoxLayout()\n",
-    "        \n",
-    "        self.export_dir = QLineEdit()\n",
-    "        self.export_dir.setReadOnly(True)\n",
-    "        export_layout.addWidget(self.export_dir)\n",
-    "        \n",
-    "        self.export_browse = QPushButton(\"Browse...\")\n",
-    "        self.export_browse.clicked.connect(self.browse_export_folder)\n",
-    "        export_layout.addWidget(self.export_browse)\n",
-    "        \n",
-    "        self.export_btn = QPushButton(\"Export All Results\")\n",
-    "        self.export_btn.setObjectName(\"success\")\n",
-    "        self.export_btn.clicked.connect(self.export_results)\n",
-    "        export_layout.addWidget(self.export_btn)\n",
-    "        \n",
-    "        export_group.setLayout(export_layout)\n",
-    "        layout.addWidget(export_group)\n",
-    "        \n",
-    "        # Results summary\n",
-    "        summary_group = QGroupBox(\"📊 Analysis Summary\")\n",
-    "        summary_layout = QVBoxLayout()\n",
-    "        \n",
-    "        self.summary_text = QTextEdit()\n",
-    "        self.summary_text.setReadOnly(True)\n",
-    "        self.summary_text.setFont(QFont(\"Courier New\", 11))\n",
-    "        summary_layout.addWidget(self.summary_text)\n",
-    "        \n",
-    "        summary_group.setLayout(summary_layout)\n",
-    "        layout.addWidget(summary_group)\n",
-    "        \n",
-    "        tab.setLayout(layout)\n",
-    "        self.tabs.addTab(tab, \"📊 Results\")\n",
-    "    \n",
-    "    # ============================================================================\n",
-    "    # Helper Methods\n",
-    "    # ============================================================================\n",
-    "    \n",
-    "    def show_welcome(self):\n",
-    "        \"\"\"Show welcome message in preview\"\"\"\n",
-    "        welcome_text = \"\"\"\n",
-    "╔══════════════════════════════════════════════════════════════╗\n",
-    "║         WAVE CLIMATE PROJECTION TOOL v1.0                    ║\n",
-    "║         CSV Edition - Structured Data Loading                ║\n",
-    "║         A Unified Framework for Wave Climate Analysis        ║\n",
-    "║         Under RCP4.5 and RCP8.5 Scenarios                    ║\n",
-    "╠══════════════════════════════════════════════════════════════╣\n",
-    "║                                                              ║\n",
-    "║   Data Loading Order:                                        ║\n",
-    "║   1. Baseline Data (2005):                                   ║\n",
-    "║      • Significant Wave Height (SWH)                        ║\n",
-    "║      • Mean Wave Period (Tm)                                 ║\n",
-    "║                                                              ║\n",
-    "║   2. RCP 4.5 Projections (2041-2100):                       ║\n",
-    "║      • SWH - RCP 4.5                                        ║\n",
-    "║      • Tm - RCP 4.5                                         ║\n",
-    "║                                                              ║\n",
-    "║   3. RCP 8.5 Projections (2041-2100):                       ║\n",
-    "║      • SWH - RCP 8.5                                        ║\n",
-    "║      • Tm - RCP 8.5                                         ║\n",
-    "║                                                              ║\n",
-    "║   Ready to begin! Please load your CSV data in order.        ║\n",
-    "║                                                              ║\n",
-    "╚══════════════════════════════════════════════════════════════╝\n",
-    "        \"\"\"\n",
-    "        self.current_data_info.setText(welcome_text)\n",
-    "        self.preview_table.setRowCount(0)\n",
-    "        self.preview_table.setColumnCount(0)\n",
-    "    \n",
-    "    def browse_file(self, file_type):\n",
-    "        \"\"\"Browse for a CSV file\"\"\"\n",
-    "        file_path, _ = QFileDialog.getOpenFileName(\n",
-    "            self, f\"Select CSV file\", \"\",\n",
-    "            \"CSV files (*.csv);;All files (*.*)\"\n",
-    "        )\n",
-    "        \n",
-    "        if file_path:\n",
-    "            self.file_paths[file_type] = file_path\n",
-    "            \n",
-    "            # Update the corresponding line edit\n",
-    "            if file_type == 'baseline_swh':\n",
-    "                self.baseline_swh_path.setText(file_path)\n",
-    "            elif file_type == 'baseline_tm':\n",
-    "                self.baseline_tm_path.setText(file_path)\n",
-    "            elif file_type == 'rcp45_swh':\n",
-    "                self.rcp45_swh_path.setText(file_path)\n",
-    "            elif file_type == 'rcp45_tm':\n",
-    "                self.rcp45_tm_path.setText(file_path)\n",
-    "            elif file_type == 'rcp85_swh':\n",
-    "                self.rcp85_swh_path.setText(file_path)\n",
-    "            elif file_type == 'rcp85_tm':\n",
-    "                self.rcp85_tm_path.setText(file_path)\n",
-    "            elif file_type == 'test':\n",
-    "                self.test_path.setText(file_path)\n",
-    "    \n",
-    "    def browse_folder(self, folder_type):\n",
-    "        \"\"\"Browse for a folder containing CSV files\"\"\"\n",
-    "        folder_path = QFileDialog.getExistingDirectory(\n",
-    "            self, f\"Select folder containing CSV files\"\n",
-    "        )\n",
-    "        \n",
-    "        if folder_path:\n",
-    "            self.folder_paths[folder_type] = folder_path\n",
-    "            \n",
-    "            # Update the corresponding line edit\n",
-    "            if folder_type == 'rcp45_swh':\n",
-    "                self.rcp45_swh_path.setText(folder_path)\n",
-    "            elif folder_type == 'rcp45_tm':\n",
-    "                self.rcp45_tm_path.setText(folder_path)\n",
-    "            elif folder_type == 'rcp85_swh':\n",
-    "                self.rcp85_swh_path.setText(folder_path)\n",
-    "            elif folder_type == 'rcp85_tm':\n",
-    "                self.rcp85_tm_path.setText(folder_path)\n",
-    "    \n",
-    "    def browse_export_folder(self):\n",
-    "        \"\"\"Browse for export folder\"\"\"\n",
-    "        folder_path = QFileDialog.getExistingDirectory(\n",
-    "            self, \"Select export folder\"\n",
-    "        )\n",
-    "        \n",
-    "        if folder_path:\n",
-    "            self.export_dir.setText(folder_path)\n",
-    "    \n",
-    "    def show_progress(self, show=True):\n",
-    "        \"\"\"Show or hide progress bar\"\"\"\n",
-    "        if show:\n",
-    "            self.progress_bar.show()\n",
-    "        else:\n",
-    "            self.progress_bar.hide()\n",
-    "    \n",
-    "    def update_progress(self, value):\n",
-    "        \"\"\"Update progress bar\"\"\"\n",
-    "        self.progress_bar.setValue(value)\n",
-    "    \n",
-    "    def update_status(self, message):\n",
-    "        \"\"\"Update status bar\"\"\"\n",
-    "        self.status_bar.showMessage(message)\n",
-    "    \n",
-    "    def show_error(self, message):\n",
-    "        \"\"\"Show error message\"\"\"\n",
-    "        QMessageBox.critical(self, \"Error\", message)\n",
-    "    \n",
-    "    def show_success(self, message):\n",
-    "        \"\"\"Show success message\"\"\"\n",
-    "        QMessageBox.information(self, \"Success\", message)\n",
-    "    \n",
-    "    def update_data_preview(self, df, title):\n",
-    "        \"\"\"Update data preview table\"\"\"\n",
-    "        if df is None or len(df) == 0:\n",
-    "            return\n",
-    "        \n",
-    "        # Show first 100 rows\n",
-    "        display_df = df.head(100)\n",
-    "        \n",
-    "        self.preview_table.setRowCount(len(display_df))\n",
-    "        self.preview_table.setColumnCount(len(display_df.columns))\n",
-    "        self.preview_table.setHorizontalHeaderLabels(display_df.columns)\n",
-    "        \n",
-    "        for i, row in display_df.iterrows():\n",
-    "            for j, col in enumerate(display_df.columns):\n",
-    "                item = QTableWidgetItem(str(row[col]))\n",
-    "                self.preview_table.setItem(i, j, item)\n",
-    "        \n",
-    "        self.preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)\n",
-    "        \n",
-    "        # Update info\n",
-    "        info = f\"📊 {title}\\n\"\n",
-    "        info += f\"Shape: {df.shape}\\n\"\n",
-    "        info += f\"Date range: {df['time'].min()} to {df['time'].max()}\\n\"\n",
-    "        \n",
-    "        # Show statistics for the appropriate column\n",
-    "        if 'swh' in df.columns:\n",
-    "            info += f\"SWH Statistics:\\n\"\n",
-    "            info += f\"  Mean: {df['swh'].mean():.4f}\\n\"\n",
-    "            info += f\"  Std: {df['swh'].std():.4f}\\n\"\n",
-    "            info += f\"  Min: {df['swh'].min():.4f}\\n\"\n",
-    "            info += f\"  Max: {df['swh'].max():.4f}\\n\"\n",
-    "        elif 'tm' in df.columns:\n",
-    "            info += f\"Tm Statistics:\\n\"\n",
-    "            info += f\"  Mean: {df['tm'].mean():.4f}\\n\"\n",
-    "            info += f\"  Std: {df['tm'].std():.4f}\\n\"\n",
-    "            info += f\"  Min: {df['tm'].min():.4f}\\n\"\n",
-    "            info += f\"  Max: {df['tm'].max():.4f}\\n\"\n",
-    "        \n",
-    "        info += f\"Showing first 100 of {len(df)} rows\"\n",
-    "        \n",
-    "        self.current_data_info.setText(info)\n",
-    "    \n",
-    "    # ============================================================================\n",
-    "    # Data Loading Methods\n",
-    "    # ============================================================================\n",
-    "    \n",
-    "    def load_baseline_data(self, variable):\n",
-    "        \"\"\"Load baseline data for specific variable\"\"\"\n",
-    "        if variable == 'swh':\n",
-    "            file_path = self.baseline_swh_path.text()\n",
-    "            data_name = \"Baseline SWH\"\n",
-    "        else:\n",
-    "            file_path = self.baseline_tm_path.text()\n",
-    "            data_name = \"Baseline Tm\"\n",
-    "        \n",
-    "        if not file_path:\n",
-    "            self.show_error(f\"Please select a {data_name} CSV file first\")\n",
-    "            return\n",
-    "        \n",
-    "        self.show_progress(True)\n",
-    "        self.update_status(f\"Loading {data_name}...\")\n",
-    "        \n",
-    "        self.worker = AnalysisWorker('load_baseline_csv', {\n",
-    "            'file_path': file_path,\n",
-    "            'data_type': data_name,\n",
-    "            'variable': variable\n",
-    "        })\n",
-    "        self.worker.progress.connect(self.update_progress)\n",
-    "        self.worker.status.connect(self.update_status)\n",
-    "        self.worker.finished.connect(lambda df: self.on_baseline_loaded(df, variable))\n",
-    "        self.worker.error.connect(self.on_worker_error)\n",
-    "        self.worker.start()\n",
-    "    \n",
-    "    def on_baseline_loaded(self, df, variable):\n",
-    "        \"\"\"Handle loaded baseline data\"\"\"\n",
-    "        if df is not None:\n",
-    "            self.baseline_data[variable] = df\n",
-    "            data_name = \"SWH\" if variable == 'swh' else \"Tm\"\n",
-    "            self.update_data_preview(df, f\"Baseline {data_name} (2005)\")\n",
-    "            \n",
-    "            self.show_progress(False)\n",
-    "            self.update_status(f\"Baseline {data_name} data loaded successfully\")\n",
-    "            self.show_success(f\"Baseline {data_name} data loaded successfully!\")\n",
-    "        else:\n",
-    "            self.show_progress(False)\n",
-    "            self.show_error(f\"Failed to load baseline {variable} data\")\n",
-    "    \n",
-    "    def load_projection_data(self, variable, scenario):\n",
-    "        \"\"\"Load projection data for specific variable and scenario\"\"\"\n",
-    "        # Get file path from the appropriate line edit\n",
-    "        if variable == 'swh' and scenario == 'rcp45':\n",
-    "            file_path = self.rcp45_swh_path.text()\n",
-    "            data_name = \"RCP 4.5 SWH\"\n",
-    "        elif variable == 'tm' and scenario == 'rcp45':\n",
-    "            file_path = self.rcp45_tm_path.text()\n",
-    "            data_name = \"RCP 4.5 Tm\"\n",
-    "        elif variable == 'swh' and scenario == 'rcp85':\n",
-    "            file_path = self.rcp85_swh_path.text()\n",
-    "            data_name = \"RCP 8.5 SWH\"\n",
-    "        elif variable == 'tm' and scenario == 'rcp85':\n",
-    "            file_path = self.rcp85_tm_path.text()\n",
-    "            data_name = \"RCP 8.5 Tm\"\n",
-    "        else:\n",
-    "            self.show_error(\"Invalid data selection\")\n",
-    "            return\n",
-    "        \n",
-    "        if not file_path or not os.path.exists(file_path):\n",
-    "            self.show_error(f\"Please select a {data_name} CSV file first\")\n",
-    "            return\n",
-    "        \n",
-    "        # Check if it's a file or folder\n",
-    "        if os.path.isfile(file_path):\n",
-    "            # It's a file, load directly\n",
-    "            self.show_progress(True)\n",
-    "            self.update_status(f\"Loading {data_name}...\")\n",
-    "            \n",
-    "            self.worker = AnalysisWorker('load_projection_csv', {\n",
-    "                'file_path': file_path,\n",
-    "                'data_type': data_name,\n",
-    "                'variable': variable\n",
-    "            })\n",
-    "            self.worker.progress.connect(self.update_progress)\n",
-    "            self.worker.status.connect(self.update_status)\n",
-    "            self.worker.finished.connect(lambda df: self.on_projection_loaded(df, variable, scenario))\n",
-    "            self.worker.error.connect(self.on_worker_error)\n",
-    "            self.worker.start()\n",
-    "        else:\n",
-    "            self.show_error(f\"Please select a valid CSV file, not a folder. Use Merge button for folders.\")\n",
-    "    \n",
-    "    def on_projection_loaded(self, df, variable, scenario):\n",
-    "        \"\"\"Handle loaded projection data\"\"\"\n",
-    "        if df is not None:\n",
-    "            self.projection_data[variable][scenario] = df\n",
-    "            data_name = f\"{scenario.upper()} {variable.upper()}\"\n",
-    "            self.update_data_preview(df, f\"{data_name} Projection (2041-2100)\")\n",
-    "            \n",
-    "            self.show_progress(False)\n",
-    "            self.update_status(f\"{data_name} data loaded successfully\")\n",
-    "            self.show_success(f\"{data_name} data loaded successfully!\")\n",
-    "        else:\n",
-    "            self.show_progress(False)\n",
-    "            self.show_error(f\"Failed to load {scenario} {variable} data\")\n",
-    "    \n",
-    "    def merge_projection_files(self, data_key, variable):\n",
-    "        \"\"\"Merge multiple CSV files for a specific data type\"\"\"\n",
-    "        folder_path = self.folder_paths.get(data_key, '')\n",
-    "        \n",
-    "        if not folder_path or not os.path.isdir(folder_path):\n",
-    "            self.show_error(f\"Please select a valid folder for {data_key}\")\n",
-    "            return\n",
-    "        \n",
-    "        self.show_progress(True)\n",
-    "        self.update_status(f\"Merging CSV files for {data_key}...\")\n",
-    "        \n",
-    "        self.worker = AnalysisWorker('merge_csv_files', {\n",
-    "            'folder_path': folder_path,\n",
-    "            'data_type': data_key,\n",
-    "            'variable': variable\n",
-    "        })\n",
-    "        self.worker.progress.connect(self.update_progress)\n",
-    "        self.worker.status.connect(self.update_status)\n",
-    "        self.worker.finished.connect(lambda df: self.on_files_merged(df, data_key, variable))\n",
-    "        self.worker.error.connect(self.on_worker_error)\n",
-    "        self.worker.start()\n",
-    "    \n",
-    "    def on_files_merged(self, df, data_key, variable):\n",
-    "        \"\"\"Handle merged files\"\"\"\n",
-    "        if df is not None:\n",
-    "            # Parse data_key to get variable and scenario\n",
-    "            if 'rcp45' in data_key:\n",
-    "                scenario = 'rcp45'\n",
-    "            elif 'rcp85' in data_key:\n",
-    "                scenario = 'rcp85'\n",
-    "            else:\n",
-    "                scenario = 'unknown'\n",
-    "            \n",
-    "            self.projection_data[variable][scenario] = df\n",
-    "            \n",
-    "            # Save merged file\n",
-    "            output_path = os.path.join(os.path.dirname(self.folder_paths[data_key]), \n",
-    "                                      f\"merged_{data_key}_data.csv\")\n",
-    "            df.to_csv(output_path, index=False)\n",
-    "            \n",
-    "            # Update the corresponding line edit with the saved file path\n",
-    "            if data_key == 'rcp45_swh':\n",
-    "                self.rcp45_swh_path.setText(output_path)\n",
-    "                self.file_paths['rcp45_swh'] = output_path\n",
-    "            elif data_key == 'rcp45_tm':\n",
-    "                self.rcp45_tm_path.setText(output_path)\n",
-    "                self.file_paths['rcp45_tm'] = output_path\n",
-    "            elif data_key == 'rcp85_swh':\n",
-    "                self.rcp85_swh_path.setText(output_path)\n",
-    "                self.file_paths['rcp85_swh'] = output_path\n",
-    "            elif data_key == 'rcp85_tm':\n",
-    "                self.rcp85_tm_path.setText(output_path)\n",
-    "                self.file_paths['rcp85_tm'] = output_path\n",
-    "            \n",
-    "            self.update_data_preview(df, f\"Merged {data_key.upper()} Data\")\n",
-    "            \n",
-    "            self.show_progress(False)\n",
-    "            self.update_status(f\"Files merged successfully for {data_key}\")\n",
-    "            self.show_success(f\"Merged {len(df)} records saved to:\\n{output_path}\")\n",
-    "        else:\n",
-    "            self.show_progress(False)\n",
-    "            self.show_error(f\"Failed to merge files for {data_key}\")\n",
-    "    \n",
-    "    def load_test_data(self):\n",
-    "        \"\"\"Load test data (like Brisbane example) with flexible date parsing\"\"\"\n",
-    "        file_path = self.test_path.text()\n",
-    "        if not file_path:\n",
-    "            self.show_error(\"Please select a test CSV file first\")\n",
-    "            return\n",
-    "        \n",
-    "        try:\n",
-    "            # Read CSV without parsing dates initially\n",
-    "            df = pd.read_csv(file_path)\n",
-    "            \n",
-    "            # Handle Brisbane format with ISO8601 dates\n",
-    "            if 'Date/Time (AEST)' in df.columns:\n",
-    "                # Try multiple date parsing strategies\n",
-    "                date_column = df['Date/Time (AEST)']\n",
-    "                \n",
-    "                # Method 1: Try ISO8601 format with T separator\n",
-    "                try:\n",
-    "                    df['time'] = pd.to_datetime(date_column, format='%Y-%m-%dT%H:%M')\n",
-    "                except (ValueError, TypeError):\n",
-    "                    try:\n",
-    "                        # Method 2: Try ISO8601 with seconds\n",
-    "                        df['time'] = pd.to_datetime(date_column, format='%Y-%m-%dT%H:%M:%S')\n",
-    "                    except (ValueError, TypeError):\n",
-    "                        try:\n",
-    "                            # Method 3: Let pandas infer with mixed format\n",
-    "                            df['time'] = pd.to_datetime(date_column, format='mixed')\n",
-    "                        except (ValueError, TypeError):\n",
-    "                            try:\n",
-    "                                # Method 4: Use infer_datetime_format\n",
-    "                                df['time'] = pd.to_datetime(date_column, infer_datetime_format=True)\n",
-    "                            except:\n",
-    "                                # Method 5: Last resort - use to_datetime with default settings\n",
-    "                                df['time'] = pd.to_datetime(date_column)\n",
-    "                \n",
-    "                # Clean data - replace -99.90 and other invalid values with NaN\n",
-    "                df.replace(-99.90, np.nan, inplace=True)\n",
-    "                df.replace(-99.9, np.nan, inplace=True)\n",
-    "                df.replace(-99, np.nan, inplace=True)\n",
-    "                \n",
-    "                # Rename columns\n",
-    "                if 'Hs (m)' in df.columns:\n",
-    "                    df.rename(columns={'Hs (m)': 'swh'}, inplace=True)\n",
-    "                elif 'Hs' in df.columns:\n",
-    "                    df.rename(columns={'Hs': 'swh'}, inplace=True)\n",
-    "                \n",
-    "                # Keep Tp for future use if available\n",
-    "                if 'Tp (s)' in df.columns:\n",
-    "                    df.rename(columns={'Tp (s)': 'tm'}, inplace=True)\n",
-    "                \n",
-    "                # Drop unwanted columns\n",
-    "                cols_to_drop = []\n",
-    "                for col in ['Hmax (m)', 'Peak Direction (degrees)', 'SST (degrees C)', \n",
-    "                           'Tz (s)', 'Date/Time (AEST)']:\n",
-    "                    if col in df.columns:\n",
-    "                        cols_to_drop.append(col)\n",
-    "                \n",
-    "                if cols_to_drop:\n",
-    "                    df.drop(cols_to_drop, axis=1, inplace=True)\n",
-    "                \n",
-    "                # Remove rows with NaN values\n",
-    "                initial_len = len(df)\n",
-    "                df.dropna(inplace=True)\n",
-    "                \n",
-    "                # Sort by time\n",
-    "                df.sort_values('time', inplace=True)\n",
-    "                df.reset_index(drop=True, inplace=True)\n",
-    "                \n",
-    "                self.test_data = df\n",
-    "                self.update_data_preview(df, \"Test Data (Brisbane 2024)\")\n",
-    "                \n",
-    "                self.update_status(f\"Test data loaded successfully: {len(df)} records\")\n",
-    "                self.show_success(f\"Test data loaded successfully!\\n{len(df)} records from {df['time'].min()} to {df['time'].max()}\")\n",
-    "                \n",
-    "            else:\n",
-    "                self.show_error(\"Could not find 'Date/Time (AEST)' column in the CSV file\")\n",
-    "            \n",
-    "        except Exception as e:\n",
-    "            self.show_error(f\"Error loading test data: {str(e)}\")\n",
-    "            import traceback\n",
-    "            traceback.print_exc()\n",
-    "    \n",
-    "    def on_worker_error(self, error_message):\n",
-    "        \"\"\"Handle worker error\"\"\"\n",
-    "        self.show_progress(False)\n",
-    "        self.show_error(f\"Error: {error_message}\")\n",
-    "        self.update_status(\"Error occurred\")\n",
-    "    \n",
-    "    # ============================================================================\n",
-    "    # Analysis Methods\n",
-    "    # ============================================================================\n",
-    "    \n",
-    "    def run_gpd_analysis(self):\n",
-    "        \"\"\"Run GPD analysis - Fixed SWH plot\"\"\"\n",
-    "        variable_idx = self.gpd_variable.currentIndex()\n",
-    "        variable = 'swh' if variable_idx == 0 else 'tm'\n",
-    "        \n",
-    "        scenario_idx = self.gpd_scenario.currentIndex()\n",
-    "        scenario = 'rcp45' if scenario_idx == 0 else 'rcp85'\n",
-    "        \n",
-    "        # Get appropriate dataframe\n",
-    "        df = self.projection_data[variable][scenario]\n",
-    "        \n",
-    "        if df is None:\n",
-    "            self.show_error(f\"Please load {scenario.upper()} {variable.upper()} data first\")\n",
-    "            return\n",
-    "        \n",
-    "        if variable not in df.columns:\n",
-    "            self.show_error(f\"Column '{variable}' not found in the data. Available columns: {list(df.columns)}\")\n",
-    "            return\n",
-    "        \n",
-    "        data_name = f\"{scenario.upper()} {variable.upper()}\"\n",
-    "        \n",
-    "        # Prepare time series\n",
-    "        data = pd.Series(\n",
-    "            df[variable].values,\n",
-    "            index=pd.to_datetime(df['time'])\n",
-    "        )\n",
-    "        \n",
-    "        self.show_progress(True)\n",
-    "        self.update_status(f\"Running GPD analysis for {data_name}...\")\n",
-    "        \n",
-    "        self.worker = AnalysisWorker('run_gpd', {\n",
-    "            'data': data,\n",
-    "            'decluster_hours': self.decluster_hours.value(),\n",
-    "            'percentile': self.threshold_percentile.value(),\n",
-    "            'data_name': data_name\n",
-    "        })\n",
-    "        self.worker.progress.connect(self.update_progress)\n",
-    "        self.worker.status.connect(self.update_status)\n",
-    "        self.worker.finished.connect(lambda result: self.on_gpd_complete(result, variable, scenario))\n",
-    "        self.worker.error.connect(self.on_worker_error)\n",
-    "        self.worker.start()\n",
-    "    \n",
-    "    def on_gpd_complete(self, result, variable, scenario):\n",
-    "        \"\"\"Handle GPD analysis complete\"\"\"\n",
-    "        if result is not None:\n",
-    "            data_name = f\"{scenario.upper()} {variable.upper()}\"\n",
-    "            self.gpd_results[variable][scenario] = result\n",
-    "            \n",
-    "            # Display results\n",
-    "            ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'\n",
-    "            text = \"🎯 GPD ANALYSIS RESULTS\\n\"\n",
-    "            text += \"=\" * 60 + \"\\n\\n\"\n",
-    "            text += f\"Dataset: {data_name}\\n\"\n",
-    "            text += f\"Threshold: {result['threshold']:.4f} {ylabel} ({self.threshold_percentile.value()}%)\\n\"\n",
-    "            text += f\"Decluster window: {self.decluster_hours.value()} hours\\n\"\n",
-    "            text += f\"Number of peaks: {result['n_peaks']}\\n\"\n",
-    "            text += f\"GPD Parameters:\\n\"\n",
-    "            text += f\"  ξ (shape): {result['xi']:.4f}\\n\"\n",
-    "            text += f\"  β (scale): {result['beta']:.4f}\\n\"\n",
-    "            \n",
-    "            self.gpd_results_text.setText(text)\n",
-    "            \n",
-    "            # Plot results\n",
-    "            self.plot_gpd_results(result, data_name, variable)\n",
-    "            \n",
-    "            self.show_progress(False)\n",
-    "            self.update_status(f\"GPD analysis complete for {data_name}\")\n",
-    "            self.show_success(f\"GPD analysis complete for {data_name}!\")\n",
-    "        else:\n",
-    "            self.show_progress(False)\n",
-    "            self.show_error(f\"Failed to run GPD analysis for {scenario} {variable}\")\n",
-    "    \n",
-    "    def plot_gpd_results(self, result, data_name, variable):\n",
-    "        \"\"\"Plot GPD analysis results - Fixed SWH plot\"\"\"\n",
-    "        # First plot - Time series with peaks (Fixed)\n",
-    "        self.gpd_figure1.clear()\n",
-    "        ax1 = self.gpd_figure1.add_subplot(111)\n",
-    "        \n",
-    "        ax1.set_facecolor('#333333')\n",
-    "        self.gpd_figure1.patch.set_facecolor('#333333')\n",
-    "        ax1.tick_params(colors='white')\n",
-    "        ax1.xaxis.label.set_color('white')\n",
-    "        ax1.yaxis.label.set_color('white')\n",
-    "        ax1.title.set_color('white')\n",
-    "        for spine in ax1.spines.values():\n",
-    "            spine.set_color('#666666')\n",
-    "        \n",
-    "        # Get the full data from the original source (not just peaks)\n",
-    "        variable_idx = self.gpd_variable.currentIndex()\n",
-    "        var = 'swh' if variable_idx == 0 else 'tm'\n",
-    "        scenario_idx = self.gpd_scenario.currentIndex()\n",
-    "        scen = 'rcp45' if scenario_idx == 0 else 'rcp85'\n",
-    "        \n",
-    "        full_data = self.projection_data[var][scen]\n",
-    "        if full_data is not None:\n",
-    "            # Plot the full time series\n",
-    "            time_series = pd.to_datetime(full_data['time'])\n",
-    "            ax1.plot(time_series, full_data[var], color='#888888', alpha=0.3, linewidth=0.5, label='Full data')\n",
-    "        \n",
-    "        # Plot peaks\n",
-    "        data = result['declustered']\n",
-    "        ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'\n",
-    "        ax1.plot(data.index, data.values, 'o', color='#00ccff', \n",
-    "                markersize=4, alpha=0.8, label='Peaks')\n",
-    "        ax1.axhline(y=result['threshold'], color='#ff6b6b', \n",
-    "                   linestyle='--', linewidth=2, label=f'Threshold ({self.threshold_percentile.value()}%)')\n",
-    "        \n",
-    "        # Add text box with peak count\n",
-    "        textstr = f'Peaks: {result[\"n_peaks\"]}'\n",
-    "        props = dict(boxstyle='round', facecolor='#444444', alpha=0.8)\n",
-    "        ax1.text(0.02, 0.98, textstr, transform=ax1.transAxes, fontsize=10,\n",
-    "                verticalalignment='top', bbox=props, color='white')\n",
-    "        \n",
-    "        ax1.set_xlabel('Time')\n",
-    "        ax1.set_ylabel(ylabel)\n",
-    "        ax1.set_title(f'Declustered Peaks - {data_name}')\n",
-    "        ax1.legend(facecolor='#444444', edgecolor='white', labelcolor='white', fontsize=8)\n",
-    "        ax1.grid(True, alpha=0.3, color='#666666')\n",
-    "        \n",
-    "        self.gpd_canvas1.draw()\n",
-    "        \n",
-    "        # Second plot - GPD fit\n",
-    "        self.gpd_figure2.clear()\n",
-    "        ax2 = self.gpd_figure2.add_subplot(111)\n",
-    "        \n",
-    "        ax2.set_facecolor('#333333')\n",
-    "        self.gpd_figure2.patch.set_facecolor('#333333')\n",
-    "        ax2.tick_params(colors='white')\n",
-    "        ax2.xaxis.label.set_color('white')\n",
-    "        ax2.yaxis.label.set_color('white')\n",
-    "        ax2.title.set_color('white')\n",
-    "        for spine in ax2.spines.values():\n",
-    "            spine.set_color('#666666')\n",
-    "        \n",
-    "        exceedances = result['exceedances']\n",
-    "        if len(exceedances) > 0:\n",
-    "            ax2.hist(exceedances, bins=30, density=True, alpha=0.5, \n",
-    "                    color='#00ccff', label='Exceedances')\n",
-    "            \n",
-    "            x = np.linspace(0, exceedances.max(), 200)\n",
-    "            pdf = genpareto.pdf(x, result['xi'], result['loc'], result['beta'])\n",
-    "            ax2.plot(x, pdf, 'r-', lw=2, \n",
-    "                    label=f'GPD fit (ξ={result[\"xi\"]:.2f}, β={result[\"beta\"]:.2f})')\n",
-    "        \n",
-    "        ax2.set_xlabel(f'Exceedance ({ylabel})')\n",
-    "        ax2.set_ylabel('Density')\n",
-    "        ax2.set_title('GPD Fit to Exceedances')\n",
-    "        ax2.legend(facecolor='#444444', edgecolor='white', labelcolor='white')\n",
-    "        ax2.grid(True, alpha=0.3, color='#666666')\n",
-    "        \n",
-    "        self.gpd_canvas2.draw()\n",
-    "    \n",
-    "    def generate_projections(self):\n",
-    "        \"\"\"Generate projected time series for selected scenarios\"\"\"\n",
-    "        variable_idx = self.proj_variable.currentIndex()\n",
-    "        variable = 'swh' if variable_idx == 0 else 'tm'\n",
-    "        \n",
-    "        scenario_text = self.proj_scenario.currentText()\n",
-    "        \n",
-    "        if self.baseline_data[variable] is None:\n",
-    "            self.show_error(f\"Please load baseline {variable.upper()} data first\")\n",
-    "            return\n",
-    "        \n",
-    "        # Check if baseline data has the required column\n",
-    "        if variable not in self.baseline_data[variable].columns:\n",
-    "            self.show_error(f\"Column '{variable}' not found in baseline data. Available columns: {list(self.baseline_data[variable].columns)}\")\n",
-    "            return\n",
-    "        \n",
-    "        # Determine scenarios to run\n",
-    "        scenarios_to_run = []\n",
-    "        if scenario_text == \"Both\":\n",
-    "            scenarios_to_run = ['rcp45', 'rcp85']\n",
-    "        elif scenario_text == \"RCP 4.5\":\n",
-    "            scenarios_to_run = ['rcp45']\n",
-    "        else:  # RCP 8.5\n",
-    "            scenarios_to_run = ['rcp85']\n",
-    "        \n",
-    "        # Check if all required data is loaded and has correct columns\n",
-    "        for sc in scenarios_to_run:\n",
-    "            if self.projection_data[variable][sc] is None:\n",
-    "                self.show_error(f\"Please load {sc.upper()} {variable.upper()} data first\")\n",
-    "                return\n",
-    "            if variable not in self.projection_data[variable][sc].columns:\n",
-    "                self.show_error(f\"Column '{variable}' not found in {sc.upper()} {variable.upper()} data. Available columns: {list(self.projection_data[variable][sc].columns)}\")\n",
-    "                return\n",
-    "        \n",
-    "        if not scenarios_to_run:\n",
-    "            return\n",
-    "        \n",
-    "        self.show_progress(True)\n",
-    "        self.update_status(f\"Generating projections for {variable.upper()}...\")\n",
-    "        \n",
-    "        # Clear previous results\n",
-    "        self.projection_results = []\n",
-    "        self.projected_series[variable] = {}\n",
-    "        self.remaining_scenarios = scenarios_to_run.copy()\n",
-    "        self.current_variable = variable\n",
-    "        \n",
-    "        # Clear projection info\n",
-    "        self.proj_info_text.clear()\n",
-    "        \n",
-    "        # Start first projection\n",
-    "        self.run_projection_sequential()\n",
-    "    \n",
-    "    def run_projection_sequential(self):\n",
-    "        \"\"\"Run projections one after another\"\"\"\n",
-    "        if not self.remaining_scenarios:\n",
-    "            # All projections completed\n",
-    "            self.on_all_projections_complete()\n",
-    "            return\n",
-    "        \n",
-    "        scenario = self.remaining_scenarios.pop(0)\n",
-    "        variable = self.current_variable\n",
-    "        \n",
-    "        self.update_status(f\"Generating projections for {scenario.upper()} {variable.upper()}...\")\n",
-    "        \n",
-    "        # Create worker for this scenario\n",
-    "        self.proj_worker = AnalysisWorker('generate_projection', {\n",
-    "            'df_obs': self.baseline_data[variable],\n",
-    "            'df_proj': self.projection_data[variable][scenario],\n",
-    "            'scenario': scenario,\n",
-    "            'variable': variable\n",
-    "        })\n",
-    "        \n",
-    "        # Connect signals\n",
-    "        self.proj_worker.finished.connect(\n",
-    "            lambda df, s=scenario, v=variable: self.on_projection_generated(df, v, s)\n",
-    "        )\n",
-    "        self.proj_worker.progress.connect(self.update_progress)\n",
-    "        self.proj_worker.status.connect(self.update_status)\n",
-    "        self.proj_worker.error.connect(self.on_worker_error)\n",
-    "        \n",
-    "        self.proj_worker.start()\n",
-    "    \n",
-    "    def on_projection_generated(self, proj_df, variable, scenario):\n",
-    "        \"\"\"Handle individual projection generation\"\"\"\n",
-    "        # Disconnect signals to avoid multiple connections\n",
-    "        if hasattr(self, 'proj_worker'):\n",
-    "            try:\n",
-    "                self.proj_worker.finished.disconnect()\n",
-    "            except:\n",
-    "                pass\n",
-    "        \n",
-    "        if proj_df is not None:\n",
-    "            # Store the result\n",
-    "            self.projected_series[variable][scenario] = proj_df\n",
-    "            self.projection_results.append(proj_df)\n",
-    "            \n",
-    "            # Update info text\n",
-    "            info = f\"✅ Generated {scenario.upper()} {variable.upper()}: {len(proj_df)} records\\n\"\n",
-    "            info += f\"   Range: [{proj_df[variable].min():.4f}, {proj_df[variable].max():.4f}]\\n\"\n",
-    "            info += f\"   Mean: {proj_df[variable].mean():.4f}, Std: {proj_df[variable].std():.4f}\\n\"\n",
-    "            self.proj_info_text.append(info)\n",
-    "            \n",
-    "            self.update_status(f\"Completed {scenario.upper()} {variable.upper()} - {len(proj_df)} records\")\n",
-    "        else:\n",
-    "            self.update_status(f\"Failed to generate projections for {scenario.upper()} {variable.upper()}\")\n",
-    "        \n",
-    "        # Run next projection\n",
-    "        self.run_projection_sequential()\n",
-    "    \n",
-    "    def on_all_projections_complete(self):\n",
-    "        \"\"\"Handle completion of all projections\"\"\"\n",
-    "        if not self.projection_results:\n",
-    "            self.show_progress(False)\n",
-    "            self.show_error(\"No projections were generated successfully\")\n",
-    "            return\n",
-    "        \n",
-    "        variable = self.current_variable\n",
-    "        variable_name = \"SWH\" if variable == 'swh' else \"Tm\"\n",
-    "        scenario_text = self.proj_scenario.currentText()\n",
-    "        \n",
-    "        # Plot all projections together\n",
-    "        self.plot_combined_projections(self.projection_results, variable_name, variable, scenario_text)\n",
-    "        \n",
-    "        # Save combined projections\n",
-    "        combined_df = pd.concat(self.projection_results, ignore_index=True)\n",
-    "        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')\n",
-    "        output_path = f\"projection_{variable_name}_{scenario_text.replace(' ', '_')}_{timestamp}.csv\"\n",
-    "        combined_df.to_csv(output_path, index=False)\n",
-    "        \n",
-    "        self.proj_info_text.append(f\"\\n✅ All projections completed and saved to:\\n{output_path}\")\n",
-    "        \n",
-    "        self.show_progress(False)\n",
-    "        self.update_status(f\"Projections generated successfully for {variable_name}\")\n",
-    "        self.show_success(f\"Projections generated and saved to:\\n{output_path}\")\n",
-    "        \n",
-    "        # Clean up\n",
-    "        self.remaining_scenarios = []\n",
-    "        self.current_variable = None\n",
-    "    \n",
-    "    def plot_combined_projections(self, projection_dfs, variable_name, variable, scenario_text):\n",
-    "        \"\"\"Plot combined projections with RCP 4.5 in blue and RCP 8.5 in red\"\"\"\n",
-    "        self.proj_figure.clear()\n",
-    "        \n",
-    "        # Create single plot for yearly averages\n",
-    "        ax = self.proj_figure.add_subplot(111)\n",
-    "        \n",
-    "        ax.set_facecolor('#333333')\n",
-    "        self.proj_figure.patch.set_facecolor('#333333')\n",
-    "        ax.tick_params(colors='white')\n",
-    "        ax.xaxis.label.set_color('white')\n",
-    "        ax.yaxis.label.set_color('white')\n",
-    "        ax.title.set_color('white')\n",
-    "        for spine in ax.spines.values():\n",
-    "            spine.set_color('#666666')\n",
-    "        \n",
-    "        colors = {'rcp45': '#0066cc', 'rcp85': '#ff4444'}\n",
-    "        labels = {'rcp45': 'RCP 4.5', 'rcp85': 'RCP 8.5'}\n",
-    "        \n",
-    "        for df in projection_dfs:\n",
-    "            if 'scenario' in df.columns:\n",
-    "                scenario = df['scenario'].iloc[0]\n",
-    "            else:\n",
-    "                continue\n",
-    "            \n",
-    "            # Calculate yearly averages\n",
-    "            df['year'] = pd.to_datetime(df['time']).dt.year\n",
-    "            yearly_avg = df.groupby('year')[variable].mean().reset_index()\n",
-    "            \n",
-    "            # Plot with appropriate color\n",
-    "            ax.plot(pd.to_datetime(yearly_avg['year'], format='%Y'), yearly_avg[variable],\n",
-    "                   'o-', color=colors.get(scenario, '#888888'), linewidth=2.5, \n",
-    "                   markersize=6, label=labels.get(scenario, scenario))\n",
-    "        \n",
-    "        ylabel = 'Hs [m]' if variable_name == 'SWH' else 'Tm [s]'\n",
-    "        title_var = 'Significant Wave Height' if variable_name == 'SWH' else 'Mean Wave Period'\n",
-    "        \n",
-    "        ax.set_xlabel('Time')\n",
-    "        ax.set_ylabel(ylabel)\n",
-    "        ax.set_title(f'Projected {title_var} - {scenario_text}')\n",
-    "        ax.legend(facecolor='#444444', edgecolor='white', labelcolor='white')\n",
-    "        ax.grid(True, alpha=0.3, color='#666666')\n",
-    "        \n",
-    "        self.proj_canvas.draw()\n",
-    "        \n",
-    "        # Plot long-term trends for all scenarios\n",
-    "        self.plot_combined_trends(projection_dfs, variable_name, variable, scenario_text)\n",
-    "    \n",
-    "    def plot_combined_trends(self, projection_dfs, variable_name, variable, scenario_text):\n",
-    "        \"\"\"Plot long-term trends for all scenarios\"\"\"\n",
-    "        self.trend_figure.clear()\n",
-    "        ax = self.trend_figure.add_subplot(111)\n",
-    "        \n",
-    "        ax.set_facecolor('#333333')\n",
-    "        self.trend_figure.patch.set_facecolor('#333333')\n",
-    "        ax.tick_params(colors='white')\n",
-    "        ax.xaxis.label.set_color('white')\n",
-    "        ax.yaxis.label.set_color('white')\n",
-    "        ax.title.set_color('white')\n",
-    "        for spine in ax.spines.values():\n",
-    "            spine.set_color('#666666')\n",
-    "        \n",
-    "        colors = {'rcp45': '#0066cc', 'rcp85': '#ff4444'}\n",
-    "        labels = {'rcp45': 'RCP 4.5', 'rcp85': 'RCP 8.5'}\n",
-    "        \n",
-    "        for df in projection_dfs:\n",
-    "            if 'scenario' in df.columns:\n",
-    "                scenario = df['scenario'].iloc[0]\n",
-    "            else:\n",
-    "                continue\n",
-    "            \n",
-    "            # Calculate yearly means\n",
-    "            df['year'] = pd.to_datetime(df['time']).dt.year\n",
-    "            yearly_means = df.groupby('year')[variable].mean()\n",
-    "            \n",
-    "            # Linear regression\n",
-    "            x = yearly_means.index.values\n",
-    "            y = yearly_means.values\n",
-    "            slope, intercept, r_value, p_value, std_err = linregress(x, y)\n",
-    "            trend = intercept + slope * x\n",
-    "            \n",
-    "            # Plot yearly means and trend\n",
-    "            ax.plot(x, y, 'o', color=colors.get(scenario, '#888888'), \n",
-    "                   markersize=5, alpha=0.7, label=f'{labels.get(scenario, scenario)} - yearly')\n",
-    "            ax.plot(x, trend, '--', color=colors.get(scenario, '#888888'), linewidth=2,\n",
-    "                   label=f'{labels.get(scenario, scenario)} trend (slope={slope:.4f} m/year)')\n",
-    "        \n",
-    "        ylabel = 'Hs [m]' if variable_name == 'SWH' else 'Tm [s]'\n",
-    "        title_var = 'Significant Wave Height' if variable_name == 'SWH' else 'Mean Wave Period'\n",
-    "        \n",
-    "        ax.set_xlabel('Year')\n",
-    "        ax.set_ylabel(f'Mean {ylabel}')\n",
-    "        ax.set_title(f'Long-term Trend Analysis - {title_var} - {scenario_text}')\n",
-    "        ax.legend(facecolor='#444444', edgecolor='white', labelcolor='white', fontsize=9)\n",
-    "        ax.grid(True, alpha=0.3, color='#666666')\n",
-    "        \n",
-    "        self.trend_canvas.draw()\n",
-    "    \n",
-    "    def export_results(self):\n",
-    "        \"\"\"Export all results to files\"\"\"\n",
-    "        export_dir = self.export_dir.text()\n",
-    "        if not export_dir:\n",
-    "            self.show_error(\"Please select an export folder first\")\n",
-    "            return\n",
-    "        \n",
-    "        try:\n",
-    "            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')\n",
-    "            exported_files = []\n",
-    "            \n",
-    "            # Export baseline data\n",
-    "            for var, df in self.baseline_data.items():\n",
-    "                if df is not None:\n",
-    "                    path = os.path.join(export_dir, f\"baseline_{var}_{timestamp}.csv\")\n",
-    "                    df.to_csv(path, index=False)\n",
-    "                    exported_files.append(path)\n",
-    "            \n",
-    "            # Export projection data\n",
-    "            for var in ['swh', 'tm']:\n",
-    "                for scenario in ['rcp45', 'rcp85']:\n",
-    "                    df = self.projection_data[var][scenario]\n",
-    "                    if df is not None:\n",
-    "                        path = os.path.join(export_dir, f\"projection_{var}_{scenario}_{timestamp}.csv\")\n",
-    "                        df.to_csv(path, index=False)\n",
-    "                        exported_files.append(path)\n",
-    "            \n",
-    "            # Export test data\n",
-    "            if self.test_data is not None:\n",
-    "                path = os.path.join(export_dir, f\"test_data_{timestamp}.csv\")\n",
-    "                self.test_data.to_csv(path, index=False)\n",
-    "                exported_files.append(path)\n",
-    "            \n",
-    "            # Export GPD results\n",
-    "            for var in ['swh', 'tm']:\n",
-    "                for scenario in ['rcp45', 'rcp85']:\n",
-    "                    result = self.gpd_results[var][scenario]\n",
-    "                    if result is not None:\n",
-    "                        gpd_df = pd.DataFrame([{\n",
-    "                            'variable': var,\n",
-    "                            'scenario': scenario,\n",
-    "                            'threshold': result.get('threshold', np.nan),\n",
-    "                            'xi': result.get('xi', np.nan),\n",
-    "                            'beta': result.get('beta', np.nan),\n",
-    "                            'n_peaks': result.get('n_peaks', 0)\n",
-    "                        }])\n",
-    "                        path = os.path.join(export_dir, f\"gpd_{var}_{scenario}_{timestamp}.csv\")\n",
-    "                        gpd_df.to_csv(path, index=False)\n",
-    "                        exported_files.append(path)\n",
-    "            \n",
-    "            # Export projected series\n",
-    "            for var in ['swh', 'tm']:\n",
-    "                for scenario in ['rcp45', 'rcp85']:\n",
-    "                    df = self.projected_series[var][scenario]\n",
-    "                    if df is not None:\n",
-    "                        path = os.path.join(export_dir, f\"projected_{var}_{scenario}_{timestamp}.csv\")\n",
-    "                        df.to_csv(path, index=False)\n",
-    "                        exported_files.append(path)\n",
-    "            \n",
-    "            # Save figures\n",
-    "            figures = [\n",
-    "                (self.gpd_figure1, \"gpd_timeseries\"),\n",
-    "                (self.gpd_figure2, \"gpd_fit\"),\n",
-    "                (self.proj_figure, \"projections\"),\n",
-    "                (self.trend_figure, \"long_term_trend\")\n",
-    "            ]\n",
-    "            \n",
-    "            for fig, name in figures:\n",
-    "                if fig.axes:\n",
-    "                    path = os.path.join(export_dir, f\"{name}_{timestamp}.png\")\n",
-    "                    fig.savefig(path, dpi=300, bbox_inches='tight', facecolor='#333333')\n",
-    "                    exported_files.append(path)\n",
-    "            \n",
-    "            # Update summary\n",
-    "            summary = f\"\"\"\n",
-    "╔══════════════════════════════════════════════════════════════╗\n",
-    "║                    EXPORT COMPLETE                           ║\n",
-    "╠══════════════════════════════════════════════════════════════╣\n",
-    "║                                                              ║\n",
-    "║  Export Directory: {export_dir}\n",
-    "║  Timestamp: {timestamp}\n",
-    "║  Files Exported: {len(exported_files)}\n",
-    "║                                                              ║\n",
-    "║  Exported Files:                                            ║\"\"\"\n",
-    "            \n",
-    "            for f in exported_files[:10]:  # Show first 10\n",
-    "                summary += f\"\\n  • {os.path.basename(f)}\"\n",
-    "            \n",
-    "            if len(exported_files) > 10:\n",
-    "                summary += f\"\\n  • ... and {len(exported_files) - 10} more\"\n",
-    "            \n",
-    "            summary += \"\\n║                                                              \\n\"\n",
-    "            summary += \"╚══════════════════════════════════════════════════════════════╝\"\n",
-    "            \n",
-    "            self.summary_text.setText(summary)\n",
-    "            \n",
-    "            self.show_success(f\"Results exported successfully to {export_dir}\")\n",
-    "            \n",
-    "        except Exception as e:\n",
-    "            self.show_error(f\"Error exporting results: {str(e)}\")\n",
-    "\n",
-    "\n",
-    "# ============================================================================\n",
-    "# Main Entry Point\n",
-    "# ============================================================================\n",
-    "\n",
-    "def main():\n",
-    "    app = QApplication(sys.argv)\n",
-    "    app.setStyle('Fusion')\n",
-    "    \n",
-    "    window = WaveClimateApp()\n",
-    "    window.show()\n",
-    "    \n",
-    "    sys.exit(app.exec_())\n",
-    "\n",
-    "\n",
-    "if __name__ == \"__main__\":\n",
-    "    main()"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3 (ipykernel)",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.10.19"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 5
-}
+    
+    return result
+
+def generate_projection(df_obs, df_proj, scenario, variable):
+    """Generate projected time series"""
+    if variable not in df_obs.columns:
+        st.error(f"Column '{variable}' not found in baseline data")
+        return None
+    
+    if variable not in df_proj.columns:
+        st.error(f"Column '{variable}' not found in projection data")
+        return None
+    
+    df_proj['time'] = pd.to_datetime(df_proj['time'])
+    years = df_proj['time'].dt.year.unique()
+    years.sort()
+    
+    projected_data = []
+    
+    for year in years:
+        df_year = df_proj[df_proj['time'].dt.year == year].copy()
+        
+        if len(df_year) < 2:
+            continue
+        
+        time_index = pd.date_range(
+            start=f"{year}-01-01 00:00:00",
+            periods=len(df_year),
+            freq='H'
+        )[:len(df_year)]
+        
+        year_df = pd.DataFrame({
+            'time': time_index,
+            variable: df_year[variable].values[:len(time_index)],
+            'scenario': scenario,
+            'variable': variable
+        })
+        
+        projected_data.append(year_df)
+    
+    if projected_data:
+        result_df = pd.concat(projected_data, ignore_index=True)
+        return result_df
+    else:
+        return None
+
+# ============================================================================
+# Streamlit UI
+# ============================================================================
+
+st.title("🌊 Wave Climate Projection Tool")
+st.markdown("### CSV Edition - RCP4.5/RCP8.5 Scenarios")
+st.markdown("---")
+
+# Initialize session state
+if 'baseline_data' not in st.session_state:
+    st.session_state.baseline_data = {'swh': None, 'tm': None}
+if 'projection_data' not in st.session_state:
+    st.session_state.projection_data = {
+        'swh': {'rcp45': None, 'rcp85': None},
+        'tm': {'rcp45': None, 'rcp85': None}
+    }
+if 'gpd_results' not in st.session_state:
+    st.session_state.gpd_results = {
+        'swh': {'rcp45': None, 'rcp85': None},
+        'tm': {'rcp45': None, 'rcp85': None}
+    }
+if 'projected_series' not in st.session_state:
+    st.session_state.projected_series = {
+        'swh': {'rcp45': None, 'rcp85': None},
+        'tm': {'rcp45': None, 'rcp85': None}
+    }
+
+# ============================================================================
+# Sidebar - Data Loading
+# ============================================================================
+
+st.sidebar.header("📁 Data Loading")
+
+# Baseline Data
+st.sidebar.subheader("Baseline Data (2005)")
+baseline_swh_file = st.sidebar.file_uploader("Baseline SWH", type=['csv'], key="baseline_swh")
+baseline_tm_file = st.sidebar.file_uploader("Baseline Tm", type=['csv'], key="baseline_tm")
+
+if baseline_swh_file is not None:
+    try:
+        df = pd.read_csv(baseline_swh_file)
+        df = standardize_column_names(df, 'swh')
+        if 'swh' in df.columns:
+            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2005-01-01', periods=len(df), freq='H')
+            st.session_state.baseline_data['swh'] = df
+            st.sidebar.success(f"✅ SWH loaded: {len(df)} records")
+        else:
+            st.sidebar.error("SWH column not found")
+    except Exception as e:
+        st.sidebar.error(f"Error loading SWH: {str(e)}")
+
+if baseline_tm_file is not None:
+    try:
+        df = pd.read_csv(baseline_tm_file)
+        df = standardize_column_names(df, 'tm')
+        if 'tm' in df.columns:
+            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2005-01-01', periods=len(df), freq='H')
+            st.session_state.baseline_data['tm'] = df
+            st.sidebar.success(f"✅ Tm loaded: {len(df)} records")
+        else:
+            st.sidebar.error("Tm column not found")
+    except Exception as e:
+        st.sidebar.error(f"Error loading Tm: {str(e)}")
+
+st.sidebar.markdown("---")
+
+# RCP 4.5 Data
+st.sidebar.subheader("RCP 4.5 Projections (2041-2100)")
+rcp45_swh_file = st.sidebar.file_uploader("RCP 4.5 SWH", type=['csv'], key="rcp45_swh")
+rcp45_tm_file = st.sidebar.file_uploader("RCP 4.5 Tm", type=['csv'], key="rcp45_tm")
+
+if rcp45_swh_file is not None:
+    try:
+        df = pd.read_csv(rcp45_swh_file)
+        df = standardize_column_names(df, 'swh')
+        if 'swh' in df.columns:
+            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            st.session_state.projection_data['swh']['rcp45'] = df
+            st.sidebar.success(f"✅ RCP 4.5 SWH loaded: {len(df)} records")
+        else:
+            st.sidebar.error("SWH column not found")
+    except Exception as e:
+        st.sidebar.error(f"Error: {str(e)}")
+
+if rcp45_tm_file is not None:
+    try:
+        df = pd.read_csv(rcp45_tm_file)
+        df = standardize_column_names(df, 'tm')
+        if 'tm' in df.columns:
+            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            st.session_state.projection_data['tm']['rcp45'] = df
+            st.sidebar.success(f"✅ RCP 4.5 Tm loaded: {len(df)} records")
+        else:
+            st.sidebar.error("Tm column not found")
+    except Exception as e:
+        st.sidebar.error(f"Error: {str(e)}")
+
+st.sidebar.markdown("---")
+
+# RCP 8.5 Data
+st.sidebar.subheader("RCP 8.5 Projections (2041-2100)")
+rcp85_swh_file = st.sidebar.file_uploader("RCP 8.5 SWH", type=['csv'], key="rcp85_swh")
+rcp85_tm_file = st.sidebar.file_uploader("RCP 8.5 Tm", type=['csv'], key="rcp85_tm")
+
+if rcp85_swh_file is not None:
+    try:
+        df = pd.read_csv(rcp85_swh_file)
+        df = standardize_column_names(df, 'swh')
+        if 'swh' in df.columns:
+            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            st.session_state.projection_data['swh']['rcp85'] = df
+            st.sidebar.success(f"✅ RCP 8.5 SWH loaded: {len(df)} records")
+        else:
+            st.sidebar.error("SWH column not found")
+    except Exception as e:
+        st.sidebar.error(f"Error: {str(e)}")
+
+if rcp85_tm_file is not None:
+    try:
+        df = pd.read_csv(rcp85_tm_file)
+        df = standardize_column_names(df, 'tm')
+        if 'tm' in df.columns:
+            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            st.session_state.projection_data['tm']['rcp85'] = df
+            st.sidebar.success(f"✅ RCP 8.5 Tm loaded: {len(df)} records")
+        else:
+            st.sidebar.error("Tm column not found")
+    except Exception as e:
+        st.sidebar.error(f"Error: {str(e)}")
+
+# ============================================================================
+# Main Content Tabs
+# ============================================================================
+
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Data Preview", "🎯 GPD Analysis", "🔄 Projections", "📈 Results"])
+
+# ============================================================================
+# Tab 1: Data Preview
+# ============================================================================
+
+with tab1:
+    st.header("Data Preview")
+    
+    data_type = st.selectbox("Select data to preview", 
+                           ["Baseline SWH", "Baseline Tm", "RCP 4.5 SWH", "RCP 4.5 Tm", "RCP 8.5 SWH", "RCP 8.5 Tm"])
+    
+    data_map = {
+        "Baseline SWH": st.session_state.baseline_data['swh'],
+        "Baseline Tm": st.session_state.baseline_data['tm'],
+        "RCP 4.5 SWH": st.session_state.projection_data['swh']['rcp45'],
+        "RCP 4.5 Tm": st.session_state.projection_data['tm']['rcp45'],
+        "RCP 8.5 SWH": st.session_state.projection_data['swh']['rcp85'],
+        "RCP 8.5 Tm": st.session_state.projection_data['tm']['rcp85']
+    }
+    
+    df = data_map.get(data_type)
+    
+    if df is not None:
+        st.write(f"**Shape:** {df.shape}")
+        st.write(f"**Columns:** {list(df.columns)}")
+        if 'time' in df.columns:
+            st.write(f"**Date range:** {df['time'].min()} to {df['time'].max()}")
+        
+        variable = 'swh' if 'SWH' in data_type else 'tm'
+        if variable in df.columns:
+            st.write(f"**{variable.upper()} Statistics:**")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Mean", f"{df[variable].mean():.4f}")
+            col2.metric("Std", f"{df[variable].std():.4f}")
+            col3.metric("Min", f"{df[variable].min():.4f}")
+            col4.metric("Max", f"{df[variable].max():.4f}")
+        
+        st.dataframe(df.head(100))
+    else:
+        st.info("No data loaded. Please upload data files in the sidebar.")
+
+# ============================================================================
+# Tab 2: GPD Analysis
+# ============================================================================
+
+with tab2:
+    st.header("🎯 GPD Analysis")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        gpd_variable = st.selectbox("Variable", ["Significant Wave Height (SWH)", "Mean Wave Period (Tm)"])
+        variable = 'swh' if 'SWH' in gpd_variable else 'tm'
+    
+    with col2:
+        gpd_scenario = st.selectbox("Scenario", ["RCP 4.5", "RCP 8.5"])
+        scenario = 'rcp45' if 'RCP 4.5' in gpd_scenario else 'rcp85'
+    
+    with col3:
+        decluster_hours = st.number_input("Decluster Hours", min_value=0, max_value=72, value=12, step=1)
+        threshold_percentile = st.number_input("Threshold Percentile", min_value=90.0, max_value=99.9, value=99.5, step=0.1)
+    
+    if st.button("🎯 Run GPD Analysis", type="primary"):
+        df = st.session_state.projection_data[variable][scenario]
+        
+        if df is None:
+            st.error(f"Please load {gpd_scenario} {gpd_variable} data first")
+        elif variable not in df.columns:
+            st.error(f"Column '{variable}' not found in data")
+        else:
+            with st.spinner(f"Running GPD analysis for {gpd_scenario} {gpd_variable}..."):
+                data = pd.Series(df[variable].values, index=pd.to_datetime(df['time']))
+                result = run_gpd_analysis(data, decluster_hours, threshold_percentile, f"{gpd_scenario} {gpd_variable}")
+                
+                if result is not None:
+                    st.session_state.gpd_results[variable][scenario] = result
+                    
+                    # Display results
+                    st.success(f"GPD Analysis Complete!")
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Threshold", f"{result['threshold']:.4f}")
+                    col2.metric("Number of Peaks", result['n_peaks'])
+                    col3.metric("ξ (Shape)", f"{result['xi']:.4f}")
+                    col4.metric("β (Scale)", f"{result['beta']:.4f}")
+                    
+                    # Plot results
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                    fig.patch.set_facecolor('#f0f0f0')
+                    
+                    # Time series with peaks
+                    ax1.plot(data.index, data.values, color='gray', alpha=0.3, linewidth=0.5, label='Full data')
+                    ax1.plot(result['declustered'].index, result['declustered'].values, 'o', color='blue', markersize=4, label='Peaks')
+                    ax1.axhline(y=result['threshold'], color='red', linestyle='--', linewidth=2, label=f'Threshold ({threshold_percentile}%)')
+                    ax1.set_xlabel('Time')
+                    ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'
+                    ax1.set_ylabel(ylabel)
+                    ax1.set_title(f'Declustered Peaks - {gpd_scenario} {gpd_variable}')
+                    ax1.legend()
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # GPD fit
+                    exceedances = result['exceedances']
+                    if len(exceedances) > 0:
+                        ax2.hist(exceedances, bins=30, density=True, alpha=0.5, color='blue', label='Exceedances')
+                        x = np.linspace(0, exceedances.max(), 200)
+                        pdf = genpareto.pdf(x, result['xi'], result['loc'], result['beta'])
+                        ax2.plot(x, pdf, 'r-', lw=2, label=f'GPD fit (ξ={result["xi"]:.2f}, β={result["beta"]:.2f})')
+                    ax2.set_xlabel(f'Exceedance ({ylabel})')
+                    ax2.set_ylabel('Density')
+                    ax2.set_title('GPD Fit to Exceedances')
+                    ax2.legend()
+                    ax2.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+
+# ============================================================================
+# Tab 3: Projections
+# ============================================================================
+
+with tab3:
+    st.header("🔄 Generate Projections")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        proj_variable = st.selectbox("Variable for Projection", ["Significant Wave Height (SWH)", "Mean Wave Period (Tm)"], key="proj_var")
+        variable = 'swh' if 'SWH' in proj_variable else 'tm'
+    
+    with col2:
+        proj_scenario = st.selectbox("Scenario", ["RCP 4.5", "RCP 8.5", "Both"], key="proj_scen")
+    
+    if st.button("🔄 Generate Projections", type="primary"):
+        if st.session_state.baseline_data[variable] is None:
+            st.error(f"Please load baseline {variable.upper()} data first")
+        else:
+            scenarios_to_run = []
+            if proj_scenario == "Both":
+                scenarios_to_run = ['rcp45', 'rcp85']
+            elif proj_scenario == "RCP 4.5":
+                scenarios_to_run = ['rcp45']
+            else:
+                scenarios_to_run = ['rcp85']
+            
+            missing = False
+            for sc in scenarios_to_run:
+                if st.session_state.projection_data[variable][sc] is None:
+                    st.error(f"Please load {sc.upper()} {variable.upper()} data first")
+                    missing = True
+                    break
+            
+            if not missing:
+                with st.spinner(f"Generating projections for {proj_variable}..."):
+                    projection_results = []
+                    
+                    for sc in scenarios_to_run:
+                        proj_df = generate_projection(
+                            st.session_state.baseline_data[variable],
+                            st.session_state.projection_data[variable][sc],
+                            sc,
+                            variable
+                        )
+                        if proj_df is not None:
+                            st.session_state.projected_series[variable][sc] = proj_df
+                            projection_results.append(proj_df)
+                            st.success(f"✅ {sc.upper()} {proj_variable}: {len(proj_df)} records")
+                    
+                    if projection_results:
+                        # Plot combined projections
+                        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                        fig.patch.set_facecolor('#f0f0f0')
+                        
+                        colors = {'rcp45': 'blue', 'rcp85': 'red'}
+                        labels = {'rcp45': 'RCP 4.5', 'rcp85': 'RCP 8.5'}
+                        
+                        # Yearly averages
+                        for df in projection_results:
+                            scenario = df['scenario'].iloc[0]
+                            df['year'] = pd.to_datetime(df['time']).dt.year
+                            yearly_avg = df.groupby('year')[variable].mean().reset_index()
+                            ax1.plot(pd.to_datetime(yearly_avg['year'], format='%Y'), yearly_avg[variable],
+                                   'o-', color=colors.get(scenario, 'gray'), linewidth=2.5, 
+                                   markersize=6, label=labels.get(scenario, scenario))
+                        
+                        ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'
+                        title_var = 'Significant Wave Height' if variable == 'swh' else 'Mean Wave Period'
+                        ax1.set_xlabel('Time')
+                        ax1.set_ylabel(ylabel)
+                        ax1.set_title(f'Projected {title_var} - {proj_scenario}')
+                        ax1.legend()
+                        ax1.grid(True, alpha=0.3)
+                        
+                        # Long-term trends
+                        for df in projection_results:
+                            scenario = df['scenario'].iloc[0]
+                            df['year'] = pd.to_datetime(df['time']).dt.year
+                            yearly_means = df.groupby('year')[variable].mean()
+                            
+                            x = yearly_means.index.values
+                            y = yearly_means.values
+                            slope, intercept, r_value, p_value, std_err = linregress(x, y)
+                            trend = intercept + slope * x
+                            
+                            ax2.plot(x, y, 'o', color=colors.get(scenario, 'gray'), 
+                                   markersize=5, alpha=0.7, label=f'{labels.get(scenario, scenario)} - yearly')
+                            ax2.plot(x, trend, '--', color=colors.get(scenario, 'gray'), linewidth=2,
+                                   label=f'{labels.get(scenario, scenario)} trend (slope={slope:.4f} {ylabel}/year)')
+                        
+                        ax2.set_xlabel('Year')
+                        ax2.set_ylabel(f'Mean {ylabel}')
+                        ax2.set_title(f'Long-term Trend Analysis - {title_var}')
+                        ax2.legend()
+                        ax2.grid(True, alpha=0.3)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        
+                        # Combined data download
+                        combined_df = pd.concat(projection_results, ignore_index=True)
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        csv = combined_df.to_csv(index=False)
+                        st.download_button(
+                            label="📥 Download Projections CSV",
+                            data=csv,
+                            file_name=f"projections_{proj_scenario.replace(' ', '_')}_{timestamp}.csv",
+                            mime="text/csv"
+                        )
+
+# ============================================================================
+# Tab 4: Results
+# ============================================================================
+
+with tab4:
+    st.header("📈 Results Summary")
+    
+    # Show data status
+    st.subheader("Data Status")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Baseline Data**")
+        for var in ['swh', 'tm']:
+            status = "✅" if st.session_state.baseline_data[var] is not None else "❌"
+            st.write(f"{status} Baseline {var.upper()}")
+    
+    with col2:
+        st.markdown("**Projection Data**")
+        for scenario in ['rcp45', 'rcp85']:
+            for var in ['swh', 'tm']:
+                status = "✅" if st.session_state.projection_data[var][scenario] is not None else "❌"
+                st.write(f"{status} {scenario.upper()} {var.upper()}")
+    
+    st.markdown("---")
+    
+    # GPD Results Summary
+    st.subheader("GPD Analysis Results")
+    gpd_data = []
+    for var in ['swh', 'tm']:
+        for scenario in ['rcp45', 'rcp85']:
+            result = st.session_state.gpd_results[var][scenario]
+            if result is not None:
+                gpd_data.append({
+                    'Variable': var.upper(),
+                    'Scenario': scenario.upper(),
+                    'Threshold': f"{result['threshold']:.4f}",
+                    'Peaks': result['n_peaks'],
+                    'ξ': f"{result['xi']:.4f}",
+                    'β': f"{result['beta']:.4f}"
+                })
+    
+    if gpd_data:
+        st.dataframe(pd.DataFrame(gpd_data))
+    else:
+        st.info("No GPD analysis results yet. Run GPD analysis in the GPD tab.")
+    
+    st.markdown("---")
+    
+    # Projected Series Status
+    st.subheader("Projected Series")
+    for var in ['swh', 'tm']:
+        for scenario in ['rcp45', 'rcp85']:
+            df = st.session_state.projected_series[var][scenario]
+            if df is not None:
+                st.write(f"✅ {scenario.upper()} {var.upper()}: {len(df)} records")
+                st.write(f"   Mean: {df[var].mean():.4f}, Min: {df[var].min():.4f}, Max: {df[var].max():.4f}")
+
+# ============================================================================
+# Footer
+# ============================================================================
+
+st.markdown("---")
+st.markdown("### 📋 Instructions")
+st.markdown("""
+1. **Load Data**: Upload CSV files in the sidebar
+2. **Analyze**: Run GPD analysis on projection data
+3. **Project**: Generate projections for selected scenarios
+4. **Export**: Download results as CSV files
+""")
+st.markdown("---")
+st.caption("Wave Climate Projection Tool v1.0 | CSV Edition | RCP4.5/RCP8.5")
