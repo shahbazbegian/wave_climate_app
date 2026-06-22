@@ -8,13 +8,26 @@ Author: Based on research paper "Wave Climate Projection under Climate Change Sc
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.stats import genpareto, linregress
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 import os
 from io import StringIO
+
+# Check for optional dependencies
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    st.warning("Matplotlib not available. Plotting features will be disabled.")
+
+try:
+    from scipy.stats import genpareto, linregress
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    st.warning("Scipy not available. GPD analysis features will be disabled.")
 
 st.set_page_config(page_title="Wave Climate Projection Tool", layout="wide")
 
@@ -66,6 +79,10 @@ def load_csv_with_date_parsing(file_path):
 
 def run_gpd_analysis(data, decluster_hours, percentile, data_name):
     """Run GPD analysis"""
+    if not SCIPY_AVAILABLE:
+        st.error("Scipy is required for GPD analysis. Please install scipy.")
+        return None
+    
     threshold = np.percentile(data, percentile)
     
     if decluster_hours == 0:
@@ -144,6 +161,10 @@ def generate_projection(df_obs, df_proj, scenario, variable):
 st.title("🌊 Wave Climate Projection Tool")
 st.markdown("### CSV Edition - RCP4.5/RCP8.5 Scenarios")
 st.markdown("---")
+
+# Check dependencies
+if not MATPLOTLIB_AVAILABLE or not SCIPY_AVAILABLE:
+    st.warning("⚠️ Some features are disabled due to missing dependencies. Please install required packages.")
 
 # Initialize session state
 if 'baseline_data' not in st.session_state:
@@ -320,74 +341,80 @@ with tab1:
 with tab2:
     st.header("🎯 GPD Analysis")
     
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        gpd_variable = st.selectbox("Variable", ["Significant Wave Height (SWH)", "Mean Wave Period (Tm)"])
-        variable = 'swh' if 'SWH' in gpd_variable else 'tm'
-    
-    with col2:
-        gpd_scenario = st.selectbox("Scenario", ["RCP 4.5", "RCP 8.5"])
-        scenario = 'rcp45' if 'RCP 4.5' in gpd_scenario else 'rcp85'
-    
-    with col3:
-        decluster_hours = st.number_input("Decluster Hours", min_value=0, max_value=72, value=12, step=1)
-        threshold_percentile = st.number_input("Threshold Percentile", min_value=90.0, max_value=99.9, value=99.5, step=0.1)
-    
-    if st.button("🎯 Run GPD Analysis", type="primary"):
-        df = st.session_state.projection_data[variable][scenario]
+    if not SCIPY_AVAILABLE:
+        st.error("⚠️ Scipy library is not available. Please install scipy to use GPD analysis features.")
+        st.info("Run: pip install scipy")
+    else:
+        col1, col2, col3 = st.columns(3)
         
-        if df is None:
-            st.error(f"Please load {gpd_scenario} {gpd_variable} data first")
-        elif variable not in df.columns:
-            st.error(f"Column '{variable}' not found in data")
-        else:
-            with st.spinner(f"Running GPD analysis for {gpd_scenario} {gpd_variable}..."):
-                data = pd.Series(df[variable].values, index=pd.to_datetime(df['time']))
-                result = run_gpd_analysis(data, decluster_hours, threshold_percentile, f"{gpd_scenario} {gpd_variable}")
-                
-                if result is not None:
-                    st.session_state.gpd_results[variable][scenario] = result
+        with col1:
+            gpd_variable = st.selectbox("Variable", ["Significant Wave Height (SWH)", "Mean Wave Period (Tm)"])
+            variable = 'swh' if 'SWH' in gpd_variable else 'tm'
+        
+        with col2:
+            gpd_scenario = st.selectbox("Scenario", ["RCP 4.5", "RCP 8.5"])
+            scenario = 'rcp45' if 'RCP 4.5' in gpd_scenario else 'rcp85'
+        
+        with col3:
+            decluster_hours = st.number_input("Decluster Hours", min_value=0, max_value=72, value=12, step=1)
+            threshold_percentile = st.number_input("Threshold Percentile", min_value=90.0, max_value=99.9, value=99.5, step=0.1)
+        
+        if st.button("🎯 Run GPD Analysis", type="primary"):
+            df = st.session_state.projection_data[variable][scenario]
+            
+            if df is None:
+                st.error(f"Please load {gpd_scenario} {gpd_variable} data first")
+            elif variable not in df.columns:
+                st.error(f"Column '{variable}' not found in data")
+            else:
+                with st.spinner(f"Running GPD analysis for {gpd_scenario} {gpd_variable}..."):
+                    data = pd.Series(df[variable].values, index=pd.to_datetime(df['time']))
+                    result = run_gpd_analysis(data, decluster_hours, threshold_percentile, f"{gpd_scenario} {gpd_variable}")
                     
-                    # Display results
-                    st.success(f"GPD Analysis Complete!")
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Threshold", f"{result['threshold']:.4f}")
-                    col2.metric("Number of Peaks", result['n_peaks'])
-                    col3.metric("ξ (Shape)", f"{result['xi']:.4f}")
-                    col4.metric("β (Scale)", f"{result['beta']:.4f}")
-                    
-                    # Plot results
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-                    fig.patch.set_facecolor('#f0f0f0')
-                    
-                    # Time series with peaks
-                    ax1.plot(data.index, data.values, color='gray', alpha=0.3, linewidth=0.5, label='Full data')
-                    ax1.plot(result['declustered'].index, result['declustered'].values, 'o', color='blue', markersize=4, label='Peaks')
-                    ax1.axhline(y=result['threshold'], color='red', linestyle='--', linewidth=2, label=f'Threshold ({threshold_percentile}%)')
-                    ax1.set_xlabel('Time')
-                    ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'
-                    ax1.set_ylabel(ylabel)
-                    ax1.set_title(f'Declustered Peaks - {gpd_scenario} {gpd_variable}')
-                    ax1.legend()
-                    ax1.grid(True, alpha=0.3)
-                    
-                    # GPD fit
-                    exceedances = result['exceedances']
-                    if len(exceedances) > 0:
-                        ax2.hist(exceedances, bins=30, density=True, alpha=0.5, color='blue', label='Exceedances')
-                        x = np.linspace(0, exceedances.max(), 200)
-                        pdf = genpareto.pdf(x, result['xi'], result['loc'], result['beta'])
-                        ax2.plot(x, pdf, 'r-', lw=2, label=f'GPD fit (ξ={result["xi"]:.2f}, β={result["beta"]:.2f})')
-                    ax2.set_xlabel(f'Exceedance ({ylabel})')
-                    ax2.set_ylabel('Density')
-                    ax2.set_title('GPD Fit to Exceedances')
-                    ax2.legend()
-                    ax2.grid(True, alpha=0.3)
-                    
-                    plt.tight_layout()
-                    st.pyplot(fig)
+                    if result is not None and MATPLOTLIB_AVAILABLE:
+                        st.session_state.gpd_results[variable][scenario] = result
+                        
+                        # Display results
+                        st.success(f"GPD Analysis Complete!")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Threshold", f"{result['threshold']:.4f}")
+                        col2.metric("Number of Peaks", result['n_peaks'])
+                        col3.metric("ξ (Shape)", f"{result['xi']:.4f}")
+                        col4.metric("β (Scale)", f"{result['beta']:.4f}")
+                        
+                        # Plot results
+                        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+                        fig.patch.set_facecolor('#f0f0f0')
+                        
+                        # Time series with peaks
+                        ax1.plot(data.index, data.values, color='gray', alpha=0.3, linewidth=0.5, label='Full data')
+                        ax1.plot(result['declustered'].index, result['declustered'].values, 'o', color='blue', markersize=4, label='Peaks')
+                        ax1.axhline(y=result['threshold'], color='red', linestyle='--', linewidth=2, label=f'Threshold ({threshold_percentile}%)')
+                        ax1.set_xlabel('Time')
+                        ylabel = 'Hs [m]' if variable == 'swh' else 'Tm [s]'
+                        ax1.set_ylabel(ylabel)
+                        ax1.set_title(f'Declustered Peaks - {gpd_scenario} {gpd_variable}')
+                        ax1.legend()
+                        ax1.grid(True, alpha=0.3)
+                        
+                        # GPD fit
+                        exceedances = result['exceedances']
+                        if len(exceedances) > 0:
+                            ax2.hist(exceedances, bins=30, density=True, alpha=0.5, color='blue', label='Exceedances')
+                            x = np.linspace(0, exceedances.max(), 200)
+                            pdf = genpareto.pdf(x, result['xi'], result['loc'], result['beta'])
+                            ax2.plot(x, pdf, 'r-', lw=2, label=f'GPD fit (ξ={result["xi"]:.2f}, β={result["beta"]:.2f})')
+                        ax2.set_xlabel(f'Exceedance ({ylabel})')
+                        ax2.set_ylabel('Density')
+                        ax2.set_title('GPD Fit to Exceedances')
+                        ax2.legend()
+                        ax2.grid(True, alpha=0.3)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                    elif result is not None and not MATPLOTLIB_AVAILABLE:
+                        st.success("GPD analysis complete, but matplotlib is not available for plotting.")
 
 # ============================================================================
 # Tab 3: Projections
@@ -424,7 +451,7 @@ with tab3:
                     missing = True
                     break
             
-            if not missing:
+            if not missing and MATPLOTLIB_AVAILABLE:
                 with st.spinner(f"Generating projections for {proj_variable}..."):
                     projection_results = []
                     
@@ -500,6 +527,8 @@ with tab3:
                             file_name=f"projections_{proj_scenario.replace(' ', '_')}_{timestamp}.csv",
                             mime="text/csv"
                         )
+            elif not missing and not MATPLOTLIB_AVAILABLE:
+                st.error("Matplotlib is not available. Projection visualization requires matplotlib.")
 
 # ============================================================================
 # Tab 4: Results
