@@ -8,16 +8,13 @@ Author: Based on research paper "Wave Climate Projection under Climate Change Sc
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Use Agg backend for non-interactive environments
 import matplotlib.pyplot as plt
 from scipy.stats import genpareto, linregress
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
-import os
-from io import StringIO
 
+# Set page config must be the first Streamlit command
 st.set_page_config(page_title="Wave Climate Projection Tool", layout="wide")
 
 # ============================================================================
@@ -140,14 +137,9 @@ def generate_projection(df_obs, df_proj, scenario, variable):
         return None
 
 # ============================================================================
-# Streamlit UI
+# Initialize session state
 # ============================================================================
 
-st.title("🌊 Wave Climate Projection Tool")
-st.markdown("### CSV Edition - RCP4.5/RCP8.5 Scenarios")
-st.markdown("---")
-
-# Initialize session state
 if 'baseline_data' not in st.session_state:
     st.session_state.baseline_data = {'swh': None, 'tm': None}
 if 'projection_data' not in st.session_state:
@@ -167,6 +159,14 @@ if 'projected_series' not in st.session_state:
     }
 
 # ============================================================================
+# Streamlit UI
+# ============================================================================
+
+st.title("🌊 Wave Climate Projection Tool")
+st.markdown("### CSV Edition - RCP4.5/RCP8.5 Scenarios")
+st.markdown("---")
+
+# ============================================================================
 # Sidebar - Data Loading
 # ============================================================================
 
@@ -182,7 +182,10 @@ if baseline_swh_file is not None:
         df = pd.read_csv(baseline_swh_file)
         df = standardize_column_names(df, 'swh')
         if 'swh' in df.columns:
-            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2005-01-01', periods=len(df), freq='H')
+            if 'time' not in df.columns:
+                df['time'] = pd.date_range(start='2005-01-01', periods=len(df), freq='H')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
             st.session_state.baseline_data['swh'] = df
             st.sidebar.success(f"✅ SWH loaded: {len(df)} records")
         else:
@@ -195,7 +198,10 @@ if baseline_tm_file is not None:
         df = pd.read_csv(baseline_tm_file)
         df = standardize_column_names(df, 'tm')
         if 'tm' in df.columns:
-            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2005-01-01', periods=len(df), freq='H')
+            if 'time' not in df.columns:
+                df['time'] = pd.date_range(start='2005-01-01', periods=len(df), freq='H')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
             st.session_state.baseline_data['tm'] = df
             st.sidebar.success(f"✅ Tm loaded: {len(df)} records")
         else:
@@ -215,7 +221,10 @@ if rcp45_swh_file is not None:
         df = pd.read_csv(rcp45_swh_file)
         df = standardize_column_names(df, 'swh')
         if 'swh' in df.columns:
-            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            if 'time' not in df.columns:
+                df['time'] = pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
             st.session_state.projection_data['swh']['rcp45'] = df
             st.sidebar.success(f"✅ RCP 4.5 SWH loaded: {len(df)} records")
         else:
@@ -228,7 +237,10 @@ if rcp45_tm_file is not None:
         df = pd.read_csv(rcp45_tm_file)
         df = standardize_column_names(df, 'tm')
         if 'tm' in df.columns:
-            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            if 'time' not in df.columns:
+                df['time'] = pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
             st.session_state.projection_data['tm']['rcp45'] = df
             st.sidebar.success(f"✅ RCP 4.5 Tm loaded: {len(df)} records")
         else:
@@ -248,7 +260,10 @@ if rcp85_swh_file is not None:
         df = pd.read_csv(rcp85_swh_file)
         df = standardize_column_names(df, 'swh')
         if 'swh' in df.columns:
-            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            if 'time' not in df.columns:
+                df['time'] = pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
             st.session_state.projection_data['swh']['rcp85'] = df
             st.sidebar.success(f"✅ RCP 8.5 SWH loaded: {len(df)} records")
         else:
@@ -261,7 +276,10 @@ if rcp85_tm_file is not None:
         df = pd.read_csv(rcp85_tm_file)
         df = standardize_column_names(df, 'tm')
         if 'tm' in df.columns:
-            df['time'] = pd.to_datetime(df['time']) if 'time' in df.columns else pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            if 'time' not in df.columns:
+                df['time'] = pd.date_range(start='2041-01-01', periods=len(df), freq='H')
+            else:
+                df['time'] = pd.to_datetime(df['time'])
             st.session_state.projection_data['tm']['rcp85'] = df
             st.sidebar.success(f"✅ RCP 8.5 Tm loaded: {len(df)} records")
         else:
@@ -390,6 +408,7 @@ with tab2:
                     
                     plt.tight_layout()
                     st.pyplot(fig)
+                    plt.close(fig)  # Close figure to free memory
 
 # ============================================================================
 # Tab 3: Projections
@@ -491,6 +510,7 @@ with tab3:
                         
                         plt.tight_layout()
                         st.pyplot(fig)
+                        plt.close(fig)  # Close figure to free memory
                         
                         # Combined data download
                         combined_df = pd.concat(projection_results, ignore_index=True)
