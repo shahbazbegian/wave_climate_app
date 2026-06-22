@@ -8,6 +8,8 @@ Author: Based on research paper "Wave Climate Projection under Climate Change Sc
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use Agg backend for non-interactive environments
 import matplotlib.pyplot as plt
 from scipy.stats import genpareto, linregress
 from datetime import datetime
