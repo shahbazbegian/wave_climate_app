@@ -1,15 +1,13 @@
 """
 Wave Climate Projection Tool — Streamlit Edition (Optimized)
 Professional web app for Wave Climate Analysis under RCP Scenarios
-Optimized for faster file uploads and processing
-Author: Based on research paper "Wave Climate Projection under Climate Change Scenarios"
+Optimized for faster file uploads while maintaining original structure
 """
 
 import os
 import io
 from datetime import datetime
 import time
-import zipfile
 
 import numpy as np
 import pandas as pd
@@ -36,72 +34,54 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+DARK_PLOT_BG = '#333333'
+
 # ============================================================================
-# CACHING - Critical for performance!
+# CACHE DECORATORS - Add these to speed up file loading
 # ============================================================================
 
 @st.cache_data(ttl=3600, max_entries=20)
-def load_csv_with_cache(file_bytes, file_name, variable_type):
+def load_csv_with_cache(file_bytes, variable_type):
     """
-    Cache-loaded CSV files to prevent reprocessing on every rerun.
-    Returns: (DataFrame, warning_message)
+    Cached version of CSV loading - much faster on subsequent loads
     """
     try:
-        # Read CSV with optimized parameters
-        # Remove infer_datetime_format as it's deprecated in newer pandas
+        # Read CSV with optimized parameters (removed deprecated infer_datetime_format)
         df = pd.read_csv(
             io.BytesIO(file_bytes),
             parse_dates=['time'],
             low_memory=False
         )
         
-        # Validate required columns
-        required_cols = ['time', variable_type]
-        if not all(col in df.columns for col in required_cols):
-            return None, f"CSV must contain columns: {', '.join(required_cols)}"
-        
-        # Convert time to datetime if needed (with explicit format for speed)
+        # Ensure time is datetime
         if not pd.api.types.is_datetime64_any_dtype(df['time']):
-            # Try to infer format automatically
-            try:
-                df['time'] = pd.to_datetime(df['time'])
-            except:
-                # If automatic fails, try common formats
-                for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y %H:%M:%S', '%d/%m/%Y']:
-                    try:
-                        df['time'] = pd.to_datetime(df['time'], format=fmt)
-                        break
-                    except:
-                        continue
+            df['time'] = pd.to_datetime(df['time'])
         
-        # Remove duplicates and sort
+        # Sort and deduplicate
         df = df.drop_duplicates(subset=['time'])
         df = df.sort_values('time').reset_index(drop=True)
         
         return df, None
-        
     except Exception as e:
         return None, f"Error loading file: {str(e)}"
 
 @st.cache_data(ttl=3600, max_entries=10)
-def merge_csv_files_cached(file_list, variable_type):
+def merge_csv_files_cached(file_data_list, variable_type):
     """
-    Cache-optimized file merging
+    Cached version of CSV merging - much faster
     """
-    if not file_list:
+    if not file_data_list:
         return None
-        
-    all_dfs = []
-    total_files = len(file_list)
     
-    for idx, (file_name, file_bytes) in enumerate(file_list):
-        df, _ = load_csv_with_cache(file_bytes, file_name, variable_type)
+    all_dfs = []
+    for file_name, file_bytes in file_data_list:
+        df, _ = load_csv_with_cache(file_bytes, variable_type)
         if df is not None:
             all_dfs.append(df)
     
     if not all_dfs:
         return None
-        
+    
     # Concatenate all dataframes
     combined = pd.concat(all_dfs, ignore_index=True)
     combined = combined.drop_duplicates(subset=['time'])
@@ -112,21 +92,29 @@ def merge_csv_files_cached(file_list, variable_type):
 @st.cache_data(ttl=3600, max_entries=10)
 def run_gpd_analysis_cached(data_series, decluster_hours, threshold_percentile):
     """
-    Cache GPD analysis results
+    Cached version of GPD analysis
     """
     try:
-        from scipy.stats import genpareto
-        
-        # Ensure we have a pandas Series
-        if not isinstance(data_series, pd.Series):
-            data_series = pd.Series(data_series)
-        
+        # Use the original analysis function if available
+        if hasattr(analysis, 'run_gpd_analysis'):
+            return analysis.run_gpd_analysis(data_series, decluster_hours, threshold_percentile)
+        else:
+            # Fallback implementation if analysis module doesn't have the function
+            return run_gpd_analysis_fallback(data_series, decluster_hours, threshold_percentile)
+    except Exception as e:
+        st.error(f"GPD analysis error: {str(e)}")
+        return None
+
+def run_gpd_analysis_fallback(data_series, decluster_hours, threshold_percentile):
+    """
+    Fallback GPD analysis if analysis module doesn't have the function
+    """
+    try:
         # Remove NaN values
         data_series = data_series.dropna()
-        
         if len(data_series) == 0:
             return None
-            
+        
         # Calculate threshold
         threshold = np.percentile(data_series, threshold_percentile)
         
@@ -135,14 +123,12 @@ def run_gpd_analysis_cached(data_series, decluster_hours, threshold_percentile):
         
         # Declustering
         if decluster_hours > 0 and len(peaks) > 0:
-            # Convert to DataFrame for easier handling
             peaks_df = pd.DataFrame({
                 'value': peaks.values,
                 'time': peaks.index
             })
             peaks_df = peaks_df.sort_values('time')
             
-            # Decluster by time
             declustered_peaks = []
             current_peak = None
             last_time = None
@@ -177,7 +163,7 @@ def run_gpd_analysis_cached(data_series, decluster_hours, threshold_percentile):
         
         if len(exceedances) < 5:
             return None
-            
+        
         params = genpareto.fit(exceedances)
         xi, loc, beta = params
         
@@ -186,13 +172,13 @@ def run_gpd_analysis_cached(data_series, decluster_hours, threshold_percentile):
             'n_peaks': len(peaks_series),
             'xi': xi,
             'beta': beta,
+            'loc': loc,
             'exceedances': exceedances,
             'declustered': peaks_series,
             'peaks': peaks
         }
         
         return result
-        
     except Exception as e:
         print(f"GPD analysis error: {str(e)}")
         return None
@@ -200,7 +186,22 @@ def run_gpd_analysis_cached(data_series, decluster_hours, threshold_percentile):
 @st.cache_data(ttl=3600, max_entries=10)
 def generate_projection_cached(baseline_df, projection_df, scenario, variable):
     """
-    Cache projection results
+    Cached version of projection generation
+    """
+    try:
+        # Use the original analysis function if available
+        if hasattr(analysis, 'generate_projection'):
+            # We need to handle the progress callback differently for cached version
+            return analysis.generate_projection(baseline_df, projection_df, scenario, variable, progress_callback=None)
+        else:
+            # Fallback implementation
+            return generate_projection_fallback(baseline_df, projection_df, scenario, variable)
+    except Exception as e:
+        return None, str(e)
+
+def generate_projection_fallback(baseline_df, projection_df, scenario, variable):
+    """
+    Fallback projection generation if analysis module doesn't have the function
     """
     try:
         if baseline_df is None or projection_df is None:
@@ -227,7 +228,6 @@ def generate_projection_cached(baseline_df, projection_df, scenario, variable):
         projection_std = projection_df[variable].std()
         
         # Calculate scaling factors
-        scale_factor = projection_mean / baseline_mean if baseline_mean != 0 else 1.0
         std_factor = projection_std / baseline_std if baseline_std != 0 else 1.0
         
         # Apply scaling to create projected series
@@ -237,19 +237,17 @@ def generate_projection_cached(baseline_df, projection_df, scenario, variable):
         # Add scenario information
         projected['scenario'] = scenario
         
-        # Add some randomness based on standard deviation
+        # Add some randomness
         noise = np.random.normal(0, projection_std * 0.1, len(projected))
         projected[variable] = projected[variable] + noise
         
-        # Ensure values are positive for physical quantities
+        # Ensure values are positive
         projected[variable] = np.maximum(projected[variable], 0)
         
-        # Add time shift to match projection period
+        # Add time shift
         projection_years = projection_df['time'].dt.year
         if len(projection_years) > 0:
             min_year = projection_years.min()
-            max_year = projection_years.max()
-            # Create time series for projected data
             base_times = projected['time']
             projected['time'] = base_times + pd.Timedelta(days=(min_year - 2005) * 365.25)
         
@@ -279,7 +277,6 @@ def init_state():
         },
         'test_data': None,
         'projection_results': [],
-        'upload_timestamps': {},  # Track when files were uploaded
         '_last_gpd': None,
         '_last_proj': None,
         '_last_proj_csv': None,
@@ -293,103 +290,7 @@ def init_state():
 init_state()
 
 # ============================================================================
-# Optimized file upload components
-# ============================================================================
-
-def create_file_uploader(key, label, variable_type, help_text=None, placeholder=None):
-    """
-    Create a file uploader with optimized settings
-    """
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        uploaded_file = st.file_uploader(
-            label,
-            type="csv",
-            key=f"up_{key}",
-            help=help_text,
-            accept_multiple_files=False  # Single file for better performance
-        )
-    
-    with col2:
-        st.markdown("<br>", unsafe_allow_html=True)  # Spacing
-        if uploaded_file and st.button(f"Load {key}", key=f"btn_{key}", type="primary"):
-            with st.spinner(f"Loading {key}..."):
-                start_time = time.time()
-                
-                # Read file bytes
-                file_bytes = uploaded_file.getvalue()
-                
-                # Load with cache
-                df, warning = load_csv_with_cache(file_bytes, uploaded_file.name, variable_type)
-                
-                if df is not None:
-                    # Store in session state
-                    if 'baseline' in key:
-                        st.session_state.baseline_data[variable_type] = df
-                    elif 'test' in key:
-                        st.session_state.test_data = df
-                    else:
-                        # Projection data - parse scenario and variable from key
-                        parts = key.split('_')
-                        if len(parts) >= 3:
-                            scenario = parts[1]  # rcp45 or rcp85
-                            var = parts[2]  # swh or tm
-                            st.session_state.projection_data[var][scenario] = df
-                    
-                    st.session_state.upload_timestamps[key] = time.time()
-                    
-                    if warning:
-                        st.warning(warning)
-                    else:
-                        st.success(f"✅ Loaded {len(df):,} records in {time.time()-start_time:.1f}s")
-                        st.balloons()
-                else:
-                    st.error(warning or "Failed to load file")
-    
-    return uploaded_file
-
-def create_multi_file_uploader(key, label, variable_type, help_text=None):
-    """
-    Create a multi-file uploader for merging
-    """
-    uploaded_files = st.file_uploader(
-        label,
-        type="csv",
-        key=f"up_{key}_multi",
-        help=help_text,
-        accept_multiple_files=True
-    )
-    
-    if uploaded_files and len(uploaded_files) > 0:
-        if st.button(f"Merge {len(uploaded_files)} files", key=f"btn_merge_{key}", type="primary"):
-            with st.spinner(f"Merging {len(uploaded_files)} files..."):
-                start_time = time.time()
-                
-                # Prepare file list for caching
-                file_list = [(f.name, f.getvalue()) for f in uploaded_files]
-                
-                # Merge with cache
-                merged_df = merge_csv_files_cached(tuple(file_list), variable_type)
-                
-                if merged_df is not None:
-                    # Store in session state
-                    parts = key.split('_')
-                    if len(parts) >= 3:
-                        scenario = parts[1]
-                        var = parts[2]
-                        st.session_state.projection_data[var][scenario] = merged_df
-                    
-                    st.session_state.upload_timestamps[key] = time.time()
-                    st.success(f"✅ Merged {len(uploaded_files)} files into {len(merged_df):,} records in {time.time()-start_time:.1f}s")
-                    st.balloons()
-                else:
-                    st.error("Failed to merge files - no valid data found")
-    
-    return uploaded_files
-
-# ============================================================================
-# Helper functions
+# Helper: data preview
 # ============================================================================
 
 def style_dark_axes(ax, fig):
@@ -403,8 +304,8 @@ def style_dark_axes(ax, fig):
     for spine in ax.spines.values():
         spine.set_color('#666666')
 
-def show_data_preview(df, title, max_rows=100):
-    """Show a dataframe preview with summary stats"""
+def show_data_preview(df, title):
+    """Show a dataframe preview + summary stats, mirroring update_data_preview."""
     if df is None or len(df) == 0:
         st.info("No data loaded")
         return
@@ -415,7 +316,7 @@ def show_data_preview(df, title, max_rows=100):
     c2.metric("Columns", df.shape[1])
     if 'time' in df.columns:
         try:
-            c3.metric("Date range", f"{df['time'].min().date()} → {df['time'].max().date()}")
+            c3.metric("Date range", f"{pd.to_datetime(df['time']).min().date()} → {pd.to_datetime(df['time']).max().date()}")
         except:
             pass
 
@@ -426,18 +327,60 @@ def show_data_preview(df, title, max_rows=100):
         s = df['tm']
         st.caption(f"Tm — mean: {s.mean():.4f}  |  std: {s.std():.4f}  |  min: {s.min():.4f}  |  max: {s.max():.4f}")
 
-    # Show only first 100 rows for performance
-    st.dataframe(df.head(max_rows), use_container_width=True, height=280)
-    if len(df) > max_rows:
-        st.caption(f"Showing first {max_rows:,} of {len(df):,} rows")
-    else:
-        st.caption(f"Showing all {len(df):,} rows")
+    st.dataframe(df.head(100), use_container_width=True, height=280)
+    st.caption(f"Showing first 100 of {len(df):,} rows")
 
 # ============================================================================
-# Main App
+# Optimized file loading functions (replace analysis module calls)
 # ============================================================================
 
-DARK_PLOT_BG = '#333333'
+def load_baseline_csv_optimized(file, variable_type):
+    """
+    Optimized version of analysis.load_baseline_csv
+    """
+    file_bytes = file.getvalue()
+    df, warning = load_csv_with_cache(file_bytes, variable_type)
+    return df, warning
+
+def load_projection_csv_optimized(file, variable_type):
+    """
+    Optimized version of analysis.load_projection_csv
+    """
+    file_bytes = file.getvalue()
+    df, warning = load_csv_with_cache(file_bytes, variable_type)
+    return df, warning
+
+def load_test_data_optimized(file):
+    """
+    Optimized version of analysis.load_test_data
+    """
+    try:
+        file_bytes = file.getvalue()
+        df, warning = load_csv_with_cache(file_bytes, 'swh')
+        if warning:
+            return None, warning
+        return df, None
+    except Exception as e:
+        return None, str(e)
+
+def merge_csv_files_optimized(files, variable_type):
+    """
+    Optimized version of analysis.merge_csv_files
+    """
+    if not files:
+        return None
+    
+    # Prepare file list for caching
+    file_data_list = [(f.name, f.getvalue()) for f in files]
+    
+    # Use cached merge
+    merged = merge_csv_files_cached(tuple(file_data_list), variable_type)
+    
+    return merged
+
+# ============================================================================
+# Header
+# ============================================================================
 
 st.markdown(
     """
@@ -445,23 +388,10 @@ st.markdown(
     .stApp { background-color: #1e1e1e; }
     section[data-testid="stSidebar"] { background-color: #252525; }
     .stButton button { width: 100%; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { 
-        background-color: #2d2d2d;
-        border-radius: 4px;
-        padding: 8px 16px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #4a4a4a;
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
-
-# ============================================================================
-# Header
-# ============================================================================
 
 col_title, col_version = st.columns([4, 1])
 with col_title:
@@ -473,10 +403,6 @@ with col_version:
         unsafe_allow_html=True,
     )
 
-# ============================================================================
-# Tabs
-# ============================================================================
-
 tab_data, tab_gpd, tab_proj, tab_results = st.tabs(
     ["📁 Data Loading", "🎯 GPD Analysis", "🔄 Projections", "📊 Results"]
 )
@@ -486,103 +412,169 @@ tab_data, tab_gpd, tab_proj, tab_results = st.tabs(
 # ============================================================================
 
 with tab_data:
-    st.markdown("### 📥 Load Data Files")
-    st.caption("Files are cached for better performance on subsequent runs")
-    
+    st.markdown(
+        """
+Load your CSV data in order:
+1. **Baseline Data (2005)** — SWH and Tm
+2. **RCP 4.5 Projections (2041–2100)** — SWH and Tm
+3. **RCP 8.5 Projections (2041–2100)** — SWH and Tm
+
+Optionally load a **test dataset** (e.g. Brisbane format) for validation.
+"""
+    )
+
     # ---------------- Baseline ----------------
     with st.expander("📊 Baseline Data (2005)", expanded=True):
         bc1, bc2 = st.columns(2)
         with bc1:
-            create_file_uploader(
-                "baseline_swh", 
-                "📄 Baseline SWH CSV", 
-                'swh',
-                help_text="CSV with 'time' and 'swh' columns",
-                placeholder="Upload SWH data"
-            )
+            st.markdown("**Significant Wave Height (SWH)**")
+            f = st.file_uploader("Baseline SWH CSV", type="csv", key="up_baseline_swh")
+            if f is not None and st.button("Load Baseline SWH", key="btn_baseline_swh", type="primary"):
+                with st.spinner("Loading file..."):
+                    start_time = time.time()
+                    df, warning = load_baseline_csv_optimized(f, 'swh')
+                    st.session_state.baseline_data['swh'] = df
+                    if warning:
+                        st.warning(warning)
+                    else:
+                        st.success(f"✅ Baseline SWH loaded: {len(df):,} records in {time.time()-start_time:.1f}s")
         with bc2:
-            create_file_uploader(
-                "baseline_tm",
-                "📄 Baseline Tm CSV",
-                'tm',
-                help_text="CSV with 'time' and 'tm' columns",
-                placeholder="Upload Tm data"
-            )
+            st.markdown("**Mean Wave Period (Tm)**")
+            f = st.file_uploader("Baseline Tm CSV", type="csv", key="up_baseline_tm")
+            if f is not None and st.button("Load Baseline Tm", key="btn_baseline_tm", type="primary"):
+                with st.spinner("Loading file..."):
+                    start_time = time.time()
+                    df, warning = load_baseline_csv_optimized(f, 'tm')
+                    st.session_state.baseline_data['tm'] = df
+                    if warning:
+                        st.warning(warning)
+                    else:
+                        st.success(f"✅ Baseline Tm loaded: {len(df):,} records in {time.time()-start_time:.1f}s")
 
     # ---------------- RCP 4.5 ----------------
     with st.expander("🔵 RCP 4.5 Projection Data (2041–2100)"):
         rc1, rc2 = st.columns(2)
         with rc1:
             st.markdown("**Significant Wave Height (SWH)**")
-            create_file_uploader(
-                "rcp45_swh", 
-                "Single CSV file", 
-                'swh'
-            )
-            create_multi_file_uploader(
-                "rcp45_swh", 
-                "Or merge multiple CSVs", 
-                'swh'
-            )
+            f = st.file_uploader("RCP 4.5 SWH CSV (single file)", type="csv", key="up_rcp45_swh")
+            if f is not None and st.button("Load RCP 4.5 SWH", key="btn_rcp45_swh", type="primary"):
+                with st.spinner("Loading file..."):
+                    start_time = time.time()
+                    df, warning = load_projection_csv_optimized(f, 'swh')
+                    st.session_state.projection_data['swh']['rcp45'] = df
+                    if warning:
+                        st.warning(warning)
+                    else:
+                        st.success(f"✅ RCP 4.5 SWH loaded: {len(df):,} records in {time.time()-start_time:.1f}s")
+            files = st.file_uploader("...or merge multiple CSVs (one folder's worth)", type="csv",
+                                      accept_multiple_files=True, key="up_rcp45_swh_multi")
+            if files and st.button("Merge CSVs", key="btn_merge_rcp45_swh"):
+                with st.spinner(f"Merging {len(files)} files..."):
+                    start_time = time.time()
+                    merged = merge_csv_files_optimized(files, 'swh')
+                    if merged is not None:
+                        st.session_state.projection_data['swh']['rcp45'] = merged
+                        st.success(f"✅ Merged {len(files)} files → {len(merged):,} records in {time.time()-start_time:.1f}s")
+                    else:
+                        st.error("No data files found")
+
         with rc2:
             st.markdown("**Mean Wave Period (Tm)**")
-            create_file_uploader(
-                "rcp45_tm", 
-                "Single CSV file", 
-                'tm'
-            )
-            create_multi_file_uploader(
-                "rcp45_tm", 
-                "Or merge multiple CSVs", 
-                'tm'
-            )
+            f = st.file_uploader("RCP 4.5 Tm CSV (single file)", type="csv", key="up_rcp45_tm")
+            if f is not None and st.button("Load RCP 4.5 Tm", key="btn_rcp45_tm", type="primary"):
+                with st.spinner("Loading file..."):
+                    start_time = time.time()
+                    df, warning = load_projection_csv_optimized(f, 'tm')
+                    st.session_state.projection_data['tm']['rcp45'] = df
+                    if warning:
+                        st.warning(warning)
+                    else:
+                        st.success(f"✅ RCP 4.5 Tm loaded: {len(df):,} records in {time.time()-start_time:.1f}s")
+            files = st.file_uploader("...or merge multiple CSVs (one folder's worth)", type="csv",
+                                      accept_multiple_files=True, key="up_rcp45_tm_multi")
+            if files and st.button("Merge CSVs", key="btn_merge_rcp45_tm"):
+                with st.spinner(f"Merging {len(files)} files..."):
+                    start_time = time.time()
+                    merged = merge_csv_files_optimized(files, 'tm')
+                    if merged is not None:
+                        st.session_state.projection_data['tm']['rcp45'] = merged
+                        st.success(f"✅ Merged {len(files)} files → {len(merged):,} records in {time.time()-start_time:.1f}s")
+                    else:
+                        st.error("No data files found")
 
     # ---------------- RCP 8.5 ----------------
     with st.expander("🔴 RCP 8.5 Projection Data (2041–2100)"):
         rc1, rc2 = st.columns(2)
         with rc1:
             st.markdown("**Significant Wave Height (SWH)**")
-            create_file_uploader(
-                "rcp85_swh", 
-                "Single CSV file", 
-                'swh'
-            )
-            create_multi_file_uploader(
-                "rcp85_swh", 
-                "Or merge multiple CSVs", 
-                'swh'
-            )
+            f = st.file_uploader("RCP 8.5 SWH CSV (single file)", type="csv", key="up_rcp85_swh")
+            if f is not None and st.button("Load RCP 8.5 SWH", key="btn_rcp85_swh", type="primary"):
+                with st.spinner("Loading file..."):
+                    start_time = time.time()
+                    df, warning = load_projection_csv_optimized(f, 'swh')
+                    st.session_state.projection_data['swh']['rcp85'] = df
+                    if warning:
+                        st.warning(warning)
+                    else:
+                        st.success(f"✅ RCP 8.5 SWH loaded: {len(df):,} records in {time.time()-start_time:.1f}s")
+            files = st.file_uploader("...or merge multiple CSVs (one folder's worth)", type="csv",
+                                      accept_multiple_files=True, key="up_rcp85_swh_multi")
+            if files and st.button("Merge CSVs", key="btn_merge_rcp85_swh"):
+                with st.spinner(f"Merging {len(files)} files..."):
+                    start_time = time.time()
+                    merged = merge_csv_files_optimized(files, 'swh')
+                    if merged is not None:
+                        st.session_state.projection_data['swh']['rcp85'] = merged
+                        st.success(f"✅ Merged {len(files)} files → {len(merged):,} records in {time.time()-start_time:.1f}s")
+                    else:
+                        st.error("No data files found")
+
         with rc2:
             st.markdown("**Mean Wave Period (Tm)**")
-            create_file_uploader(
-                "rcp85_tm", 
-                "Single CSV file", 
-                'tm'
-            )
-            create_multi_file_uploader(
-                "rcp85_tm", 
-                "Or merge multiple CSVs", 
-                'tm'
-            )
+            f = st.file_uploader("RCP 8.5 Tm CSV (single file)", type="csv", key="up_rcp85_tm")
+            if f is not None and st.button("Load RCP 8.5 Tm", key="btn_rcp85_tm", type="primary"):
+                with st.spinner("Loading file..."):
+                    start_time = time.time()
+                    df, warning = load_projection_csv_optimized(f, 'tm')
+                    st.session_state.projection_data['tm']['rcp85'] = df
+                    if warning:
+                        st.warning(warning)
+                    else:
+                        st.success(f"✅ RCP 8.5 Tm loaded: {len(df):,} records in {time.time()-start_time:.1f}s")
+            files = st.file_uploader("...or merge multiple CSVs (one folder's worth)", type="csv",
+                                      accept_multiple_files=True, key="up_rcp85_tm_multi")
+            if files and st.button("Merge CSVs", key="btn_merge_rcp85_tm"):
+                with st.spinner(f"Merging {len(files)} files..."):
+                    start_time = time.time()
+                    merged = merge_csv_files_optimized(files, 'tm')
+                    if merged is not None:
+                        st.session_state.projection_data['tm']['rcp85'] = merged
+                        st.success(f"✅ Merged {len(files)} files → {len(merged):,} records in {time.time()-start_time:.1f}s")
+                    else:
+                        st.error("No data files found")
 
     # ---------------- Test data ----------------
     with st.expander("🧪 Test Data (e.g., Brisbane 2024)"):
-        create_file_uploader(
-            "test_data", 
-            "Test CSV", 
-            'swh',
-            help_text="CSV with 'time' and 'swh' columns"
-        )
+        f = st.file_uploader("Test CSV", type="csv", key="up_test")
+        if f is not None and st.button("Load Test Data", key="btn_test", type="primary"):
+            with st.spinner("Loading test data..."):
+                start_time = time.time()
+                df, error = load_test_data_optimized(f)
+                if error:
+                    st.error(error)
+                else:
+                    st.session_state.test_data = df
+                    st.success(f"✅ Test data loaded: {len(df):,} records from {df['time'].min()} to {df['time'].max()} in {time.time()-start_time:.1f}s")
 
     # ---------------- Preview ----------------
     st.markdown("### 📋 Data Preview")
     preview_options = {
-        "Baseline SWH": st.session_state.baseline_data.get('swh'),
-        "Baseline Tm": st.session_state.baseline_data.get('tm'),
-        "RCP 4.5 SWH": st.session_state.projection_data.get('swh', {}).get('rcp45'),
-        "RCP 4.5 Tm": st.session_state.projection_data.get('tm', {}).get('rcp45'),
-        "RCP 8.5 SWH": st.session_state.projection_data.get('swh', {}).get('rcp85'),
-        "RCP 8.5 Tm": st.session_state.projection_data.get('tm', {}).get('rcp85'),
+        "Baseline SWH": st.session_state.baseline_data['swh'],
+        "Baseline Tm": st.session_state.baseline_data['tm'],
+        "RCP 4.5 SWH": st.session_state.projection_data['swh']['rcp45'],
+        "RCP 4.5 Tm": st.session_state.projection_data['tm']['rcp45'],
+        "RCP 8.5 SWH": st.session_state.projection_data['swh']['rcp85'],
+        "RCP 8.5 Tm": st.session_state.projection_data['tm']['rcp85'],
         "Test Data": st.session_state.test_data,
     }
     loaded_options = {k: v for k, v in preview_options.items() if v is not None}
@@ -593,7 +585,7 @@ with tab_data:
         st.info("No data loaded yet — upload CSVs above to get started.")
 
 # ============================================================================
-# TAB 2 — GPD Analysis
+# TAB 2 — GPD Analysis (Optimized)
 # ============================================================================
 
 with tab_gpd:
@@ -628,12 +620,13 @@ with tab_gpd:
         else:
             data = pd.Series(df[gpd_variable].values, index=pd.to_datetime(df['time']))
             with st.spinner("Running GPD analysis..."):
+                start_time = time.time()
+                # Use cached version
                 result = run_gpd_analysis_cached(data, int(decluster_hours), float(threshold_percentile))
-            
             if result is not None:
                 st.session_state.gpd_results[gpd_variable][gpd_scenario] = result
                 st.session_state['_last_gpd'] = (result, gpd_variable, gpd_scenario, threshold_percentile)
-                st.success(f"GPD analysis complete for {gpd_scenario.upper()} {gpd_variable.upper()}!")
+                st.success(f"✅ GPD analysis complete in {time.time()-start_time:.1f}s")
             else:
                 st.error("GPD analysis failed - insufficient data or peaks")
 
@@ -651,7 +644,6 @@ with tab_gpd:
         rc3.metric("ξ (shape)", f"{result['xi']:.4f}")
         rc4.metric("β (scale)", f"{result['beta']:.4f}")
 
-        # Plot 1: Declustered Peaks
         fig1, ax1 = plt.subplots(figsize=(10, 3.5))
         style_dark_axes(ax1, fig1)
 
@@ -662,9 +654,6 @@ with tab_gpd:
 
         decl = result['declustered']
         if len(decl) > 0:
-            # Create index for plotting if it doesn't have one
-            if not hasattr(decl, 'index'):
-                decl = pd.Series(decl.values, index=range(len(decl)))
             ax1.plot(decl.index, decl.values, 'o', color='#00ccff', markersize=4, alpha=0.8, label='Peaks')
         
         ax1.axhline(y=result['threshold'], color='#ff6b6b', linestyle='--', linewidth=2,
@@ -683,7 +672,6 @@ with tab_gpd:
         st.pyplot(fig1, use_container_width=True)
         plt.close(fig1)
 
-        # Plot 2: GPD Fit
         fig2, ax2 = plt.subplots(figsize=(10, 3.5))
         style_dark_axes(ax2, fig2)
 
@@ -691,7 +679,7 @@ with tab_gpd:
         if len(exceedances) > 0:
             ax2.hist(exceedances, bins=30, density=True, alpha=0.5, color='#00ccff', label='Exceedances')
             x = np.linspace(0, exceedances.max(), 200)
-            pdf = genpareto.pdf(x, result['xi'], result['threshold'], result['beta'])
+            pdf = genpareto.pdf(x, result['xi'], result['loc'], result['beta'])
             ax2.plot(x, pdf, 'r-', lw=2, label=f'GPD fit (ξ={result["xi"]:.2f}, β={result["beta"]:.2f})')
 
         ax2.set_xlabel(f'Exceedance ({ylabel})')
@@ -705,7 +693,7 @@ with tab_gpd:
         st.info("Run a GPD analysis to see results here.")
 
 # ============================================================================
-# TAB 3 — Projections
+# TAB 3 — Projections (Optimized)
 # ============================================================================
 
 with tab_proj:
@@ -759,7 +747,7 @@ with tab_proj:
                 for idx, sc in enumerate(scenarios_to_run):
                     status.text(f"Generating projections for {sc.upper()} {proj_variable.upper()}...")
                     
-                    # Use cached function
+                    # Use cached version
                     proj_df, error = generate_projection_cached(
                         baseline_df,
                         st.session_state.projection_data[proj_variable][sc],
@@ -789,7 +777,6 @@ with tab_proj:
                         projection_results, proj_variable, proj_scenario_text, "\n\n".join(info_lines)
                     )
 
-                    # Prepare CSV download
                     combined_df = pd.concat(projection_results, ignore_index=True)
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                     variable_name = "SWH" if proj_variable == 'swh' else "Tm"
@@ -797,11 +784,9 @@ with tab_proj:
                     st.session_state['_last_proj_csv'] = (out_name, combined_df.to_csv(index=False))
 
                     st.success(f"✅ Projections generated successfully for {variable_name}")
-                    st.balloons()
                 else:
                     st.error("No projections were generated successfully")
 
-    # Display last projection results
     last_proj = st.session_state.get('_last_proj')
     if last_proj is not None:
         projection_results, variable, scenario_text, info_text = last_proj
@@ -870,10 +855,8 @@ with tab_proj:
         csv_info = st.session_state.get('_last_proj_csv')
         if csv_info:
             out_name, csv_data = csv_info
-            st.download_button("⬇️ Download combined projections CSV", 
-                              data=csv_data,
-                              file_name=out_name, 
-                              mime="text/csv")
+            st.download_button("⬇️ Download combined projections CSV", data=csv_data,
+                                file_name=out_name, mime="text/csv")
     else:
         st.info("Generate projections to see results here.")
 
@@ -885,7 +868,9 @@ with tab_results:
     st.markdown("### 💾 Export Results")
     st.caption("Download any generated data and figures as a single ZIP file.")
 
-    if st.button("📦 Prepare export package", type="primary"):
+    if st.button("Prepare export package", type="primary"):
+        import zipfile
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         buf = io.BytesIO()
         exported_files = []
@@ -948,17 +933,13 @@ with tab_results:
                 summary_lines.append(f"  • ... and {len(exported_files) - 10} more")
             st.session_state['_export_summary'] = "\n".join(summary_lines)
             st.success(f"Export package prepared with {len(exported_files)} files")
-            st.balloons()
         else:
             st.warning("No results available to export yet — load data and run some analysis first.")
 
     export_zip = st.session_state.get('_export_zip')
     if export_zip:
         name, data = export_zip
-        st.download_button("⬇️ Download export ZIP", 
-                          data=data, 
-                          file_name=name, 
-                          mime="application/zip")
+        st.download_button("⬇️ Download export ZIP", data=data, file_name=name, mime="application/zip")
 
     st.markdown("### 📊 Analysis Summary")
     summary = st.session_state.get('_export_summary')
@@ -966,10 +947,3 @@ with tab_results:
         st.code(summary, language=None)
     else:
         st.info("No export prepared yet.")
-
-# ============================================================================
-# Footer
-# ============================================================================
-
-st.markdown("---")
-st.caption("🌊 Wave Climate Projection Tool v2.0 | Optimized for performance")
