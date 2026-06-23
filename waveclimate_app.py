@@ -48,10 +48,10 @@ def load_csv_with_cache(file_bytes, file_name, variable_type):
     """
     try:
         # Read CSV with optimized parameters
+        # Remove infer_datetime_format as it's deprecated in newer pandas
         df = pd.read_csv(
             io.BytesIO(file_bytes),
             parse_dates=['time'],
-            infer_datetime_format=True,
             low_memory=False
         )
         
@@ -60,9 +60,19 @@ def load_csv_with_cache(file_bytes, file_name, variable_type):
         if not all(col in df.columns for col in required_cols):
             return None, f"CSV must contain columns: {', '.join(required_cols)}"
         
-        # Convert time to datetime if needed
+        # Convert time to datetime if needed (with explicit format for speed)
         if not pd.api.types.is_datetime64_any_dtype(df['time']):
-            df['time'] = pd.to_datetime(df['time'])
+            # Try to infer format automatically
+            try:
+                df['time'] = pd.to_datetime(df['time'])
+            except:
+                # If automatic fails, try common formats
+                for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y %H:%M:%S', '%d/%m/%Y']:
+                    try:
+                        df['time'] = pd.to_datetime(df['time'], format=fmt)
+                        break
+                    except:
+                        continue
         
         # Remove duplicates and sort
         df = df.drop_duplicates(subset=['time'])
